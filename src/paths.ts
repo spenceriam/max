@@ -20,6 +20,9 @@ export const SESSIONS_DIR = join(MAX_HOME, "sessions");
 /** Path to TUI readline history */
 export const HISTORY_PATH = join(MAX_HOME, "tui_history");
 
+/** Path to the API bearer token file */
+export const API_TOKEN_PATH = join(MAX_HOME, "api-token");
+
 /** Ensure ~/.max/ exists */
 export function ensureMaxHome(): void {
   mkdirSync(MAX_HOME, { recursive: true });

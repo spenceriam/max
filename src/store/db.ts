@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { DB_PATH, ensureMaxHome } from "../paths.js";
 
 let db: Database.Database | undefined;
+let logInsertCount = 0;
 
 export function getDb(): Database.Database {
   if (!db) {
@@ -64,6 +65,8 @@ export function getDb(): Database.Database {
       db.exec(`INSERT INTO conversation_log (role, content, source, ts) SELECT role, content, source, ts FROM conversation_log_old`);
       db.exec(`DROP TABLE conversation_log_old`);
     }
+    // Prune conversation log at startup
+    db.prepare(`DELETE FROM conversation_log WHERE id NOT IN (SELECT id FROM conversation_log ORDER BY id DESC LIMIT 200)`).run();
   }
   return db;
 }
@@ -90,7 +93,10 @@ export function logConversation(role: "user" | "assistant" | "system", content: 
   const db = getDb();
   db.prepare(`INSERT INTO conversation_log (role, content, source) VALUES (?, ?, ?)`).run(role, content, source);
   // Keep last 200 entries to support context recovery after session loss
-  db.prepare(`DELETE FROM conversation_log WHERE id NOT IN (SELECT id FROM conversation_log ORDER BY id DESC LIMIT 200)`).run();
+  logInsertCount++;
+  if (logInsertCount % 50 === 0) {
+    db.prepare(`DELETE FROM conversation_log WHERE id NOT IN (SELECT id FROM conversation_log ORDER BY id DESC LIMIT 200)`).run();
+  }
 }
 
 /** Get recent conversation history formatted for injection into system message. */
@@ -156,8 +162,8 @@ export function searchMemories(
 
   // Update last_accessed for returned memories
   if (rows.length > 0) {
-    const ids = rows.map((r) => r.id).join(",");
-    db.exec(`UPDATE memories SET last_accessed = CURRENT_TIMESTAMP WHERE id IN (${ids})`);
+    const placeholders = rows.map(() => "?").join(",");
+    db.prepare(`UPDATE memories SET last_accessed = CURRENT_TIMESTAMP WHERE id IN (${placeholders})`).run(...rows.map((r) => r.id));
   }
 
   return rows;

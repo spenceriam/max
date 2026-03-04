@@ -2,12 +2,19 @@ import { z } from "zod";
 import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
 import { getDb, addMemory, searchMemories, removeMemory } from "../store/db.js";
 import { readdirSync, readFileSync, statSync } from "fs";
-import { join } from "path";
+import { join, sep, resolve } from "path";
 import { homedir } from "os";
 import { listSkills, createSkill } from "./skills.js";
 import { config, persistModel } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
 import { getCurrentSourceChannel } from "./orchestrator.js";
+
+const BLOCKED_WORKER_DIRS = [
+  ".ssh", ".gnupg", ".aws", ".azure", ".config/gcloud",
+  ".kube", ".docker", ".npmrc", ".pypirc",
+];
+
+const MAX_CONCURRENT_WORKERS = 5;
 
 export interface WorkerInfo {
   name: string;
@@ -40,6 +47,20 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
       handler: async (args) => {
         if (deps.workers.has(args.name)) {
           return `Worker '${args.name}' already exists. Use send_to_worker to interact with it.`;
+        }
+
+        const home = homedir();
+        const resolvedDir = resolve(args.working_dir);
+        for (const blocked of BLOCKED_WORKER_DIRS) {
+          const blockedPath = join(home, blocked);
+          if (resolvedDir === blockedPath || resolvedDir.startsWith(blockedPath + sep)) {
+            return `Refused: '${args.working_dir}' is a sensitive directory. Workers cannot operate in ${blocked}.`;
+          }
+        }
+
+        if (deps.workers.size >= MAX_CONCURRENT_WORKERS) {
+          const names = Array.from(deps.workers.keys()).join(", ");
+          return `Worker limit reached (${MAX_CONCURRENT_WORKERS}). Active: ${names}. Kill a session first.`;
         }
 
         const session = await deps.client.createSession({

@@ -1,10 +1,24 @@
 import * as readline from "readline";
 import * as http from "http";
-import { exec } from "child_process";
+import { exec, execFile } from "child_process";
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from "fs";
-import { HISTORY_PATH, ensureMaxHome } from "../paths.js";
+import { HISTORY_PATH, API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
 
 const API_BASE = process.env.MAX_API_URL || "http://127.0.0.1:7777";
+
+// Load API auth token (if it exists)
+let apiToken: string | null = null;
+try {
+  if (existsSync(API_TOKEN_PATH)) {
+    apiToken = readFileSync(API_TOKEN_PATH, "utf-8").trim();
+  }
+} catch {
+  console.error("Warning: Could not read API token from " + API_TOKEN_PATH + " — requests may fail.");
+}
+
+function authHeaders(): Record<string, string> {
+  return apiToken ? { Authorization: `Bearer ${apiToken}` } : {};
+}
 
 // ── ANSI helpers ──────────────────────────────────────────
 const C = {
@@ -258,7 +272,7 @@ function fetchStartupInfo(): void {
 function connectSSE(): void {
   const url = new URL("/stream", API_BASE);
 
-  http.get(url, (res) => {
+  http.get(url, { headers: authHeaders() }, (res) => {
     console.log(C.green("  ● ") + C.dim("max — connected"));
     fetchStartupInfo();
     let buffer = "";
@@ -352,6 +366,7 @@ function sendMessage(prompt: string): void {
       headers: {
         "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(body),
+        ...authHeaders(),
       },
     },
     (res) => {
@@ -378,7 +393,7 @@ function sendMessage(prompt: string): void {
 /** Silent GET — no re-prompt (used for startup info) */
 function apiGetSilent(path: string, cb: (data: any) => void): void {
   const url = new URL(path, API_BASE);
-  http.get(url, (res) => {
+  http.get(url, { headers: authHeaders() }, (res) => {
     let data = "";
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
@@ -390,7 +405,7 @@ function apiGetSilent(path: string, cb: (data: any) => void): void {
 /** GET a JSON endpoint and call back with parsed result. */
 function apiGet(path: string, cb: (data: any) => void): void {
   const url = new URL(path, API_BASE);
-  http.get(url, (res) => {
+  http.get(url, { headers: authHeaders() }, (res) => {
     let data = "";
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
@@ -409,7 +424,7 @@ function apiPost(path: string, body: Record<string, unknown>, cb: (data: any) =>
   const url = new URL(path, API_BASE);
   const req = http.request(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(json) },
+    headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(json), ...authHeaders() },
   }, (res) => {
     let data = "";
     res.on("data", (chunk) => (data += chunk));
@@ -428,7 +443,7 @@ function apiPost(path: string, body: Record<string, unknown>, cb: (data: any) =>
 
 function sendCancel(): void {
   const url = new URL("/cancel", API_BASE);
-  const req = http.request(url, { method: "POST" }, (res) => {
+  const req = http.request(url, { method: "POST", headers: authHeaders() }, (res) => {
     let data = "";
     res.on("data", (chunk) => (data += chunk));
     res.on("end", () => {
@@ -621,15 +636,29 @@ setTimeout(() => {
         rl.prompt();
         return;
       }
-      const escaped = lastResponse.replace(/'/g, "'\\''");
-      exec(`printf '%s' '${escaped}' | xclip -selection clipboard 2>/dev/null || printf '%s' '${escaped}' | xsel --clipboard --input 2>/dev/null || printf '%s' '${escaped}' | pbcopy 2>/dev/null`, (err: Error | null) => {
-        if (err) {
+      const tryClipboard = (cmds: [string, string[]][], idx: number) => {
+        if (idx >= cmds.length) {
           console.log(C.dim("  Clipboard tool not found (install xclip or xsel).\n"));
-        } else {
-          console.log(C.dim("  ✓ Copied to clipboard.\n"));
+          rl.prompt();
+          return;
         }
-        rl.prompt();
-      });
+        const [cmd, args] = cmds[idx];
+        const proc = execFile(cmd, args, (err: Error | null) => {
+          if (err) {
+            tryClipboard(cmds, idx + 1);
+          } else {
+            console.log(C.dim("  ✓ Copied to clipboard.\n"));
+            rl.prompt();
+          }
+        });
+        proc.stdin?.write(lastResponse);
+        proc.stdin?.end();
+      };
+      tryClipboard([
+        ["pbcopy", []],
+        ["xclip", ["-selection", "clipboard"]],
+        ["xsel", ["--clipboard", "--input"]],
+      ], 0);
       return;
     }
 

@@ -169,7 +169,8 @@ process.on("unhandledRejection", (reason) => {
   console.error("[max] Unhandled rejection (kept alive):", reason);
 });
 process.on("uncaughtException", (err) => {
-  console.error("[max] Uncaught exception (kept alive):", err.message);
+  console.error("[max] Uncaught exception — shutting down:", err);
+  process.exit(1);
 });
 
 main().catch((err) => {
