@@ -38,6 +38,7 @@ const C = {
 
 // ── Layout constants ─────────────────────────────────────
 const LABEL_PAD = "          "; // 10-char indent for continuation lines
+const MAX_LABEL = `  ${C.cyan("MAX")}     `;
 
 // ── Markdown → ANSI rendering ────────────────────────────
 
@@ -85,7 +86,7 @@ function renderMarkdown(text: string): string {
 /** Write a rendered message with a role label (MAX/SYS). */
 function writeLabeled(role: "max" | "sys", text: string): void {
   const label = role === "max"
-    ? `  ${C.cyan("MAX")}     `
+    ? MAX_LABEL
     : `  ${C.dim("SYS")}     `;
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -100,7 +101,12 @@ let streamIsFirstLine = true;
 
 /** Get the prefix for the current stream line (label or padding). */
 function streamPrefix(): string {
-  return streamIsFirstLine ? `  ${C.cyan("MAX")}     ` : LABEL_PAD;
+  return streamIsFirstLine ? MAX_LABEL : LABEL_PAD;
+}
+
+function stripLeadingStreamNewlines(text: string): string {
+  if (!streamIsFirstLine || streamLineBuffer.length > 0) return text;
+  return text.replace(/^(?:\r?\n)+/, "");
 }
 
 /** Clear the current visual line (handles terminal wrapping). */
@@ -184,15 +190,17 @@ function flushStreamState(): void {
 // ── Thinking indicator ────────────────────────────────────
 let thinkingTimer: ReturnType<typeof setInterval> | undefined;
 let thinkingFrame = 0;
-const thinkingFrames = ["thinking", "thinking.", "thinking..", "thinking..."];
+let thinkingVisible = false;
+const thinkingFrames = ["Thinking", "Thinking.", "Thinking..", "Thinking..."];
 
 function startThinking(): void {
   stopThinking();
   thinkingFrame = 0;
-  process.stdout.write(`\n  ${C.cyan("MAX")}     ${C.dim(thinkingFrames[0])}`);
+  thinkingVisible = true;
+  process.stdout.write(`${MAX_LABEL}${C.dim(thinkingFrames[0])}`);
   thinkingTimer = setInterval(() => {
     thinkingFrame = (thinkingFrame + 1) % thinkingFrames.length;
-    process.stdout.write(`\r\x1b[K  ${C.cyan("MAX")}     ${C.dim(thinkingFrames[thinkingFrame])}`);
+    process.stdout.write(`\r\x1b[K${MAX_LABEL}${C.dim(thinkingFrames[thinkingFrame])}`);
   }, 400);
 }
 
@@ -200,7 +208,10 @@ function stopThinking(): void {
   if (thinkingTimer) {
     clearInterval(thinkingTimer);
     thinkingTimer = undefined;
+  }
+  if (thinkingVisible) {
     process.stdout.write(`\r\x1b[K`);
+    thinkingVisible = false;
   }
 }
 
@@ -320,13 +331,12 @@ function connectSSE(): void {
                 streamLineBuffer = "";
                 inStreamCodeBlock = false;
                 streamIsFirstLine = true;
-                process.stdout.write("\n");
               }
               // Content is cumulative — only print the new part
               const full = event.content || "";
               const newText = full.slice(streamedContent.length);
               if (newText) {
-                writeStreamChunk(newText);
+                writeStreamChunk(stripLeadingStreamNewlines(newText));
                 streamedContent = full;
               }
             } else if (event.type === "cancelled") {
