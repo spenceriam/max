@@ -239,7 +239,7 @@ function startThinking(): void {
   stopThinking("restart-thinking");
   thinkingFrame = 0;
   thinkingVisible = true;
-  process.stdout.write(`${MAX_LABEL}${C.dim(thinkingFrames[0])}`);
+  process.stdout.write(`\n${MAX_LABEL}${C.dim(thinkingFrames[0])}`);
   debugLog("thinking-start", {
     requestId: activeRequestId,
     frame: thinkingFrames[0],
@@ -445,7 +445,7 @@ function connectSSE(): void {
                 isStreaming = false;
                 lastResponse = streamedContent;
                 streamedContent = "";
-                process.stdout.write("\n\n");
+                process.stdout.write("\n\n\n");
               } else {
                 // Proactive/background message — render with label
                 stopThinking("message-event");
@@ -453,7 +453,7 @@ function connectSSE(): void {
                 const rendered = renderMarkdown(event.content);
                 process.stdout.write("\n");
                 writeLabeled("max", rendered);
-                process.stdout.write("\n");
+                process.stdout.write("\n\n");
               }
               activeRequestStartedAt = 0;
               rl.prompt();
