@@ -176,6 +176,12 @@ export async function startBot(): Promise<void> {
   console.log("[max] Telegram bot starting...");
   bot.start({
     onStart: () => console.log("[max] Telegram bot connected"),
+  }).catch((err: any) => {
+    if (err?.error_code === 401) {
+      console.error("[max] ❌ Telegram bot token is invalid or expired. Run 'max setup' to reconfigure.");
+    } else {
+      console.error("[max] ❌ Telegram bot failed to start:", err?.message || err);
+    }
   });
 }
 
