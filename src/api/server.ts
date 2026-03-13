@@ -2,9 +2,10 @@ import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { randomBytes } from "crypto";
-import { sendToOrchestrator, getWorkers, cancelCurrentMessage } from "../copilot/orchestrator.js";
+import { sendToOrchestrator, getWorkers, cancelCurrentMessage, getLastRouteResult } from "../copilot/orchestrator.js";
 import { sendPhoto } from "../telegram/bot.js";
-import { config, persistModel } from "../config.js";
+import { config, persistModel, persistRouterConfig } from "../config.js";
+import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { searchMemories } from "../store/db.js";
 import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
@@ -110,9 +111,22 @@ app.post("/message", (req: Request, res: Response) => {
     (text: string, done: boolean) => {
       const sseRes = sseClients.get(connectionId);
       if (sseRes) {
-        sseRes.write(
-          `data: ${JSON.stringify({ type: done ? "message" : "delta", content: text })}\n\n`
-        );
+        const event: Record<string, unknown> = {
+          type: done ? "message" : "delta",
+          content: text,
+        };
+        if (done) {
+          const routeResult = getLastRouteResult();
+          if (routeResult) {
+            event.route = {
+              model: routeResult.model,
+              routerMode: routeResult.routerMode,
+              tier: routeResult.tier,
+              ...(routeResult.overrideName ? { overrideName: routeResult.overrideName } : {}),
+            };
+          }
+        }
+        sseRes.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     }
   );
@@ -163,6 +177,39 @@ app.post("/model", async (req: Request, res: Response) => {
   config.copilotModel = model;
   persistModel(model);
   res.json({ previous, current: model });
+});
+
+// Get router config
+app.get("/router", (_req: Request, res: Response) => {
+  const routerConfig = getRouterConfig();
+  const lastRoute = getLastRouteResult();
+  res.json({
+    ...routerConfig,
+    currentModel: config.copilotModel,
+    lastRoute: lastRoute || null,
+  });
+});
+
+// Update router config
+app.post("/router", (req: Request, res: Response) => {
+  const body = req.body as Partial<{
+    enabled: boolean;
+    tierModels: Record<string, string>;
+    cooldownMessages: number;
+  }>;
+
+  const updated = updateRouterConfig(body);
+
+  // Sync config object
+  if (body.enabled !== undefined) config.routerEnabled = body.enabled;
+  if (body.tierModels) {
+    if (body.tierModels.fast) config.routerFastModel = body.tierModels.fast;
+    if (body.tierModels.standard) config.routerStandardModel = body.tierModels.standard;
+    if (body.tierModels.premium) config.routerPremiumModel = body.tierModels.premium;
+  }
+  persistRouterConfig();
+
+  res.json(updated);
 });
 
 // List memories

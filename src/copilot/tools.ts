@@ -5,9 +5,10 @@ import { readdirSync, readFileSync, statSync } from "fs";
 import { join, sep, resolve } from "path";
 import { homedir } from "os";
 import { listSkills, createSkill, removeSkill } from "./skills.js";
-import { config, persistModel } from "../config.js";
+import { config, persistModel, persistRouterConfig } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
 import { getCurrentSourceChannel } from "./orchestrator.js";
+import { getRouterConfig, updateRouterConfig } from "./router.js";
 
 function isTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -441,11 +442,39 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           config.copilotModel = args.model_id;
           persistModel(args.model_id);
 
+          // Disable router when manually switching — user has explicit preference
+          if (getRouterConfig().enabled) {
+            updateRouterConfig({ enabled: false });
+            config.routerEnabled = false;
+            persistRouterConfig();
+            return `Switched model from '${previous}' to '${args.model_id}'. Auto-routing disabled (use toggle_router to re-enable). Takes effect on next message.`;
+          }
+
           return `Switched model from '${previous}' to '${args.model_id}'. Takes effect on next message.`;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           return `Failed to switch model: ${msg}`;
         }
+      },
+    }),
+
+    defineTool("toggle_router", {
+      description:
+        "Enable or disable the automatic model router. When enabled, Max automatically picks " +
+        "the best model (fast/standard/premium) for each message to save cost and optimize speed. " +
+        "Use when the user asks to turn auto-routing on or off.",
+      parameters: z.object({
+        enabled: z.boolean().describe("true to enable auto-routing, false to disable"),
+      }),
+      handler: async (args) => {
+        const updated = updateRouterConfig({ enabled: args.enabled });
+        config.routerEnabled = args.enabled;
+        persistRouterConfig();
+        if (args.enabled) {
+          const tiers = updated.tierModels;
+          return `Auto-routing enabled. Tier models:\n• fast: ${tiers.fast}\n• standard: ${tiers.standard}\n• premium: ${tiers.premium}\n\nMax will automatically pick the best model for each message.`;
+        }
+        return `Auto-routing disabled. Using fixed model: ${config.copilotModel}`;
       },
     }),
 

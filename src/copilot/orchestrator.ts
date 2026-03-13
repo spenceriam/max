@@ -7,6 +7,7 @@ import { getSkillDirectories } from "./skills.js";
 import { resetClient } from "./client.js";
 import { logConversation, getState, setState, deleteState, getMemorySummary, getRecentConversation } from "../store/db.js";
 import { SESSIONS_DIR } from "../paths.js";
+import { resolveModel, type Tier, type RouteResult } from "./router.js";
 
 const MAX_RETRIES = 3;
 const RECONNECT_DELAYS_MS = [1_000, 3_000, 10_000];
@@ -39,6 +40,15 @@ export function setProactiveNotify(fn: ProactiveNotifyFn): void {
 let copilotClient: CopilotClient | undefined;
 const workers = new Map<string, WorkerInfo>();
 let healthCheckTimer: ReturnType<typeof setInterval> | undefined;
+
+// Router state — tracks model across the session
+let currentSessionModel: string | undefined;
+let recentTiers: Tier[] = [];
+let lastRouteResult: RouteResult | undefined;
+
+export function getLastRouteResult(): RouteResult | undefined {
+  return lastRouteResult;
+}
 
 // Persistent orchestrator session
 let orchestratorSession: CopilotSession | undefined;
@@ -124,6 +134,7 @@ function startHealthCheck(): void {
         await ensureClient();
         // Session may need recovery after client reset
         orchestratorSession = undefined;
+        currentSessionModel = undefined;
       }
     } catch (err) {
       console.error(`[max] Health check error:`, err instanceof Error ? err.message : err);
@@ -178,6 +189,7 @@ async function createOrResumeSession(): Promise<CopilotSession> {
         infiniteSessions,
       });
       console.log(`[max] Resumed orchestrator session successfully`);
+      currentSessionModel = config.copilotModel;
       return session;
     } catch (err) {
       console.log(`[max] Could not resume session: ${err instanceof Error ? err.message : err}. Creating new.`);
@@ -218,6 +230,7 @@ async function createOrResumeSession(): Promise<CopilotSession> {
     }
   }
 
+  currentSessionModel = config.copilotModel;
   return session;
 }
 
@@ -282,6 +295,7 @@ async function executeOnSession(prompt: string, callback: MessageCallback): Prom
     if (/closed|destroy|disposed|invalid|expired|not found/i.test(msg)) {
       console.log(`[max] Session appears dead, will recreate: ${msg}`);
       orchestratorSession = undefined;
+      currentSessionModel = undefined;
       deleteState(ORCHESTRATOR_SESSION_KEY);
     }
     throw err;
@@ -306,6 +320,20 @@ async function processQueue(): Promise<void> {
     const item = messageQueue.shift()!;
     currentSourceChannel = item.sourceChannel;
     try {
+      // Route the model before executing
+      const routeResult = resolveModel(item.prompt, currentSessionModel || config.copilotModel, recentTiers);
+      if (routeResult.switched) {
+        console.log(`[max] Router: switching to ${routeResult.model} (${routeResult.overrideName || routeResult.tier})`);
+        config.copilotModel = routeResult.model;
+        orchestratorSession = undefined;
+        deleteState(ORCHESTRATOR_SESSION_KEY);
+      }
+      if (routeResult.tier) {
+        recentTiers.push(routeResult.tier);
+        if (recentTiers.length > 5) recentTiers = recentTiers.slice(-5);
+      }
+      lastRouteResult = routeResult;
+
       const result = await executeOnSession(item.prompt, item.callback);
       item.resolve(result);
     } catch (err) {
