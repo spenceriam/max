@@ -349,9 +349,13 @@ function showBanner(): void {
   console.log();
 }
 
-function showStatus(model?: string, skillCount?: number): void {
+function showStatus(model?: string, skillCount?: number, routerInfo?: { enabled: boolean }): void {
   const parts: string[] = [];
   if (model) parts.push(`${C.dim("model:")} ${C.cyan(model)}`);
+  if (routerInfo) {
+    const mode = routerInfo.enabled ? "⚡ auto" : "📌 manual";
+    parts.push(`${C.dim("router:")} ${C.cyan(mode)}`);
+  }
   if (skillCount !== undefined) parts.push(`${C.dim("skills:")} ${C.cyan(String(skillCount))}`);
   if (parts.length) console.log(`    ${parts.join("    ")}`);
   console.log();
@@ -362,14 +366,16 @@ function showStatus(model?: string, skillCount?: number): void {
 function fetchStartupInfo(): void {
   let model = "unknown";
   let skillCount = 0;
+  let routerInfo: { enabled: boolean } | undefined;
   let done = 0;
   const check = () => {
     done++;
-    if (done === 2) showStatus(model, skillCount);
+    if (done === 3) showStatus(model, skillCount, routerInfo);
   };
 
   apiGetSilent("/model", (data: any) => { model = data?.model || "unknown"; check(); });
   apiGetSilent("/skills", (data: any) => { skillCount = Array.isArray(data) ? data.length : 0; check(); });
+  apiGetSilent("/router", (data: any) => { if (data) routerInfo = { enabled: Boolean(data.enabled) }; check(); });
 }
 
 // ── SSE connection ────────────────────────────────────────
@@ -445,6 +451,15 @@ function connectSSE(): void {
                 isStreaming = false;
                 lastResponse = streamedContent;
                 streamedContent = "";
+                if (event.route) {
+                  const r = event.route;
+                  const icon = r.routerMode === "auto" ? "⚡" : "📌";
+                  const mode = r.routerMode || "manual";
+                  const label = r.overrideName
+                    ? `${icon} ${mode} · ${r.model} (${r.overrideName})`
+                    : `${icon} ${mode} · ${r.model}`;
+                  process.stdout.write(`\n${LABEL_PAD}${C.dim(label)}`);
+                }
                 process.stdout.write("\n\n\n");
               } else {
                 // Proactive/background message — render with label
@@ -750,11 +765,23 @@ function cmdSkills(): void {
   });
 }
 
+function cmdAuto(): void {
+  apiGet("/router", (data: any) => {
+    if (!data) return;
+    const newState = !data.enabled;
+    apiPost("/router", { enabled: newState }, () => {
+      const label = newState ? `${C.green("⚡")} auto` : `${C.yellow("📌")} manual`;
+      console.log(`  ${label}\n`);
+    });
+  });
+}
+
 function cmdHelp(): void {
   console.log();
   console.log(C.boldWhite("    COMMANDS"));
   console.log();
   console.log(`    ${C.coral("/model")} ${C.dim("[name]")}        show or switch model`);
+  console.log(`    ${C.coral("/auto")}                 toggle auto model routing`);
   console.log(`    ${C.coral("/memory")}               show stored memories`);
   console.log(`    ${C.coral("/skills")}               list installed skills`);
   console.log(`    ${C.coral("/workers")}              list active sessions`);
@@ -846,6 +873,7 @@ setTimeout(() => {
     if (trimmed === "/cancel") { sendCancel(); return; }
     if (trimmed === "/sessions" || trimmed === "/workers") { cmdWorkers(); return; }
     if (trimmed.startsWith("/model")) { cmdModel(trimmed.slice(6).trim()); return; }
+    if (trimmed === "/auto") { cmdAuto(); return; }
     if (trimmed === "/memory") { cmdMemory(); return; }
     if (trimmed === "/skills") { cmdSkills(); return; }
     if (trimmed === "/help") { cmdHelp(); return; }
