@@ -61,24 +61,29 @@ export const config = {
   },
 };
 
-/** Persist the current model choice to ~/.max/.env */
-export function persistModel(model: string): void {
+/** Update or append an env var in ~/.max/.env */
+function persistEnvVar(key: string, value: string): void {
   ensureMaxHome();
   try {
     const content = readFileSync(ENV_PATH, "utf-8");
     const lines = content.split("\n");
     let found = false;
     const updated = lines.map((line) => {
-      if (line.startsWith("COPILOT_MODEL=")) {
+      if (line.startsWith(`${key}=`)) {
         found = true;
-        return `COPILOT_MODEL=${model}`;
+        return `${key}=${value}`;
       }
       return line;
     });
-    if (!found) updated.push(`COPILOT_MODEL=${model}`);
+    if (!found) updated.push(`${key}=${value}`);
     writeFileSync(ENV_PATH, updated.join("\n"));
   } catch {
     // File doesn't exist — create it
-    writeFileSync(ENV_PATH, `COPILOT_MODEL=${model}\n`);
+    writeFileSync(ENV_PATH, `${key}=${value}\n`);
   }
+}
+
+/** Persist the current model choice to ~/.max/.env */
+export function persistModel(model: string): void {
+  persistEnvVar("COPILOT_MODEL", model);
 }
