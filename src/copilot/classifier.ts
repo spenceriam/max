@@ -1,4 +1,4 @@
-import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
+import { approveAll, type CopilotClient, type CopilotSession } from "@github/copilot-sdk";
 import type { Tier } from "./router.js";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +38,7 @@ async function ensureSession(client: CopilotClient): Promise<CopilotSession> {
     model: CLASSIFIER_MODEL,
     streaming: false,
     systemMessage: { content: SYSTEM_PROMPT },
+    onPermissionRequest: approveAll,
   });
   sessionClient = client;
   return classifierSession;
