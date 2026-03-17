@@ -427,6 +427,7 @@
   <a href="#skills">Skills</a>
   <a href="#memory">Memory</a>
   <a href="#models">Models</a>
+  <a href="#auto-mode">Auto Mode</a>
 
   <h4>Configuration</h4>
   <a href="#config">Environment Variables</a>
@@ -524,6 +525,7 @@
     <tr><td>/status</td><td>Daemon health check</td><td><span class="tag tag-tui">TUI</span></td></tr>
     <tr><td>/clear</td><td>Clear the terminal screen</td><td><span class="tag tag-tui">TUI</span></td></tr>
     <tr><td>/quit</td><td>Exit the TUI</td><td><span class="tag tag-tui">TUI</span></td></tr>
+    <tr><td>/auto</td><td>Toggle auto model routing</td><td><span class="tag tag-tui">TUI</span></td></tr>
     <tr><td>/help</td><td>Show command help</td><td><span class="tag tag-tui">TUI</span> <span class="tag tag-tg">TG</span></td></tr>
   </tbody>
 </table>
@@ -628,13 +630,58 @@
 <p>Max can use any model available through your Copilot subscription. Switch models in two ways:</p>
 
 <ul>
-  <li><strong>Slash command:</strong> <code>/model claude-sonnet-4.5</code></li>
+  <li><strong>Slash command:</strong> <code>/model claude-sonnet-4.6</code></li>
   <li><strong>Natural language:</strong> "Switch to GPT-4.1" — Max will use the <code>switch_model</code> tool</li>
 </ul>
 
 <p>Ask Max <em>"what models are available?"</em> to see the full list with billing multipliers. The model choice persists across restarts.</p>
 
-<p>Default model: <code>claude-sonnet-4.5</code></p>
+<p>Default model: <code>claude-sonnet-4.6</code></p>
+
+<div class="callout">
+  <p><strong>Note:</strong> Manually switching a model with <code>/model</code> disables auto mode — Max respects your explicit choice. Use <code>/auto</code> to re-enable automatic routing.</p>
+</div>
+
+
+<!-- ─────────────────── AUTO MODE ─────────────────── -->
+
+<h2 id="auto-mode">Auto Mode<span>.</span></h2>
+
+<p>Max has built-in automatic model routing that selects the best model for each message based on complexity. It's <strong>on by default</strong> — no configuration needed.</p>
+
+<h3>How it works</h3>
+
+<p>Every incoming message is classified by a lightweight GPT-4.1 classifier into one of three tiers:</p>
+
+<table class="env-table">
+  <thead><tr><th>Tier</th><th>Model</th><th>Used for</th></tr></thead>
+  <tbody>
+    <tr><td>Fast</td><td><code>gpt-4.1</code></td><td>Greetings, acknowledgments, simple factual questions</td></tr>
+    <tr><td>Standard</td><td><code>claude-sonnet-4.6</code></td><td>Coding tasks, tool usage, moderate reasoning</td></tr>
+    <tr><td>Premium</td><td><code>claude-opus-4.6</code></td><td>Complex architecture, deep analysis, multi-step reasoning</td></tr>
+  </tbody>
+</table>
+
+<h3>Override rules</h3>
+
+<p>Some keywords bypass the classifier entirely. Design and UI-related requests (e.g. "design", "css", "layout", "wireframe") always route to the premium tier to ensure the best visual reasoning.</p>
+
+<h3>Cooldown</h3>
+
+<p>To avoid rapid model switching, Max waits <strong>2 messages</strong> before switching tiers. Short follow-up responses like "yes", "do it", or "looks good" inherit the previous tier.</p>
+
+<h3>Toggling auto mode</h3>
+
+<ul>
+  <li><strong>Slash command:</strong> <code>/auto</code> — toggles on/off</li>
+  <li><strong>Natural language:</strong> "Enable auto mode" or "Turn off auto routing"</li>
+</ul>
+
+<p>When auto mode is active, the TUI shows <code>⚡ auto</code> in the status bar and labels each response with <code>⚡ auto · model-name</code>. When off, only the fixed model name is shown.</p>
+
+<div class="callout">
+  <p><strong>Tip:</strong> Manually switching a model with <code>/model &lt;name&gt;</code> automatically disables auto mode. Use <code>/auto</code> to re-enable it.</p>
+</div>
 
 
 <!-- ─────────────────── CONFIGURATION ─────────────────── -->
@@ -646,7 +693,7 @@
 <table class="env-table">
   <thead><tr><th>Variable</th><th>Default</th><th>Description</th></tr></thead>
   <tbody>
-    <tr><td>COPILOT_MODEL</td><td>claude-sonnet-4.5</td><td>Default LLM model for the orchestrator</td></tr>
+    <tr><td>COPILOT_MODEL</td><td>claude-sonnet-4.6</td><td>Default LLM model for the orchestrator</td></tr>
     <tr><td>API_PORT</td><td>7777</td><td>HTTP API port (1–65535)</td></tr>
     <tr><td>TELEGRAM_BOT_TOKEN</td><td>—</td><td>Bot token from @BotFather (optional)</td></tr>
     <tr><td>AUTHORIZED_USER_ID</td><td>—</td><td>Your Telegram numeric user ID (required if using Telegram)</td></tr>
