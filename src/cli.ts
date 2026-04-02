@@ -27,6 +27,9 @@ Commands:
   start       Start the Max daemon (Telegram bot + HTTP API)
   tui         Connect to the daemon via terminal UI
   setup       Interactive first-run configuration
+  config      Show or change saved configuration
+  autostart   Enable, disable, or inspect automatic startup
+  doctor      Run installation and runtime diagnostics
   update      Check for updates and install the latest version
   help        Show this help message
 
@@ -38,6 +41,9 @@ Examples:
   max start --self-edit  Start with self-edit enabled
   max tui             Open the terminal client
   max setup           Configure Telegram token and settings
+  max config show     Show saved configuration
+  max autostart status  Show automatic startup status
+  max doctor          Run diagnostics
 `.trim());
 }
 
@@ -60,6 +66,21 @@ switch (command) {
   case "setup":
     await import("./setup.js");
     break;
+  case "autostart": {
+    const { handleAutostartCommand } = await import("./autostart/index.js");
+    await handleAutostartCommand(args.slice(1));
+    break;
+  }
+  case "config": {
+    const { handleConfigCommand } = await import("./config-cli.js");
+    await handleConfigCommand(args.slice(1));
+    break;
+  }
+  case "doctor": {
+    const { handleDoctorCommand } = await import("./doctor.js");
+    await handleDoctorCommand(args.slice(1));
+    break;
+  }
   case "update": {
     const { checkForUpdate, performUpdate } = await import("./update.js");
     const check = await checkForUpdate();

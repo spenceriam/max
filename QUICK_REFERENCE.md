@@ -15,6 +15,9 @@
 | `max start` | Start the daemon (Telegram bot + HTTP API + orchestrator) |
 | `max tui` | Connect to daemon via terminal UI |
 | `max setup` | Interactive configuration (Telegram, Google, model selection) |
+| `max config` | Show or change saved configuration |
+| `max autostart` | Enable, disable, or inspect automatic startup |
+| `max doctor` | Run installation and runtime diagnostics |
 | `max update` | Check and install updates |
 | `max help` | Show help |
 
@@ -27,13 +30,21 @@
 
 | Path | Purpose |
 |------|---------|
-| `~/.max/.env` | Config: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID, API_PORT, COPILOT_MODEL, WORKER_TIMEOUT |
+| `~/.max/.env` | Config: TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID, API_PORT, COPILOT_MODEL, WORKER_TIMEOUT, AUTOSTART_* |
 | `~/.max/max.db` | SQLite: worker sessions, conversation log, memories, app state |
 | `~/.max/sessions/` | Copilot SDK session storage (keeps history clean) |
 | `~/.max/skills/` | User-installed skills (SKILL.md + _meta.json) |
 | `~/.max/api-token` | Bearer token for HTTP API (generated once) |
+| `~/.max/daemon.lock` | Single-instance guard for the daemon |
 | `~/.max/tui_history` | TUI readline history |
 | `~/.copilot/mcp-config.json` | MCP servers (Copilot CLI config, NOT Max's) |
+
+### VPS access
+- Keep Max bound to `127.0.0.1`
+- Use `ssh -L 7777:127.0.0.1:7777 your-vps`
+- Open `http://127.0.0.1:7777/dashboard`
+- Get the bearer token with `max config show-token`
+- On Linux VPS/container hosts, `agent-browser` may need `--args "--no-sandbox"`
 
 ---
 
@@ -73,20 +84,21 @@ Input Sources:
 ## Boot Sequence (simplified)
 
 1. **CLI routes** → `daemon.ts`
-2. **Load config** from ~/.max/.env
-3. **Init SQLite** database
-4. **Start Copilot SDK client** (auto-starts if needed)
-5. **Init orchestrator**:
+2. **Acquire daemon lock** from `~/.max/daemon.lock`
+3. **Load config** from ~/.max/.env
+4. **Init SQLite** database
+5. **Start Copilot SDK client** (auto-starts if needed)
+6. **Init orchestrator**:
    - Load MCP servers from ~/.copilot/mcp-config.json
    - Load skills from ~/.max/skills/, ~/.agents/skills/
    - Resume or create persistent orchestrator session
    - Inject recent conversation context if recovering
    - Start 30s health check loop
-6. **Start HTTP API** on port 7777 (Express)
-7. **Start Telegram bot** (if configured)
-8. **Wire up proactive notifications** (background → user channel)
-9. **Non-blocking update check**
-10. **Ready for messages**
+7. **Start HTTP API** on port 7777 (Express)
+8. **Start Telegram bot** (if configured)
+9. **Wire up proactive notifications** (background → user channel)
+10. **Non-blocking update check**
+11. **Ready for messages**
 
 ---
 
@@ -314,4 +326,3 @@ All routes require Bearer token from ~/.max/api-token (except /status).
 | `src/copilot/router.ts` | 201 | Model selection logic |
 | `src/setup.ts` | 313 | Interactive setup wizard |
 | `src/config.ts` | 90 | Config loading & persistence |
-

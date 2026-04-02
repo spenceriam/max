@@ -5,7 +5,7 @@ import { exec as execCb, execSync } from "child_process";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function getLocalVersion(): string {
+export function getLocalVersion(): string {
   try {
     const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
     return pkg.version || "0.0.0";

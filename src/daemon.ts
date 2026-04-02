@@ -1,11 +1,15 @@
 import { getClient, stopClient } from "./copilot/client.js";
 import { initOrchestrator, setMessageLogger, setProactiveNotify, getWorkers } from "./copilot/orchestrator.js";
-import { startApiServer, broadcastToSSE } from "./api/server.js";
+import { startApiServer, broadcastToSSE, stopApiServer } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
 import { getDb, closeDb } from "./store/db.js";
 import { config } from "./config.js";
 import { spawn } from "child_process";
 import { checkForUpdate } from "./update.js";
+import { DAEMON_LOCK_PATH, ensureMaxHome } from "./paths.js";
+import { acquireDaemonInstanceLock, type DaemonInstanceLock } from "./runtime/instance.js";
+
+let instanceLock: DaemonInstanceLock | undefined;
 
 function truncate(text: string, max = 200): string {
   const oneLine = text.replace(/\n/g, " ").trim();
@@ -18,68 +22,108 @@ async function main(): Promise<void> {
     console.log("[max] ⚠ Self-edit mode enabled — Max can modify his own source code");
   }
 
-  // Set up message logging to daemon console
-  setMessageLogger((direction, source, text) => {
-    const arrow = direction === "in" ? "⟶" : "⟵";
-    const tag = source.padEnd(8);
-    console.log(`[max] ${tag} ${arrow}  ${truncate(text)}`);
-  });
+  ensureMaxHome();
+  instanceLock = acquireDaemonInstanceLock(DAEMON_LOCK_PATH);
 
-  // Initialize SQLite
-  getDb();
-  console.log("[max] Database initialized");
+  try {
+    // Set up message logging to daemon console
+    setMessageLogger((direction, source, text) => {
+      const arrow = direction === "in" ? "⟶" : "⟵";
+      const tag = source.padEnd(8);
+      console.log(`[max] ${tag} ${arrow}  ${truncate(text)}`);
+    });
 
-  // Start Copilot SDK client
-  console.log("[max] Starting Copilot SDK client...");
-  const client = await getClient();
-  console.log("[max] Copilot SDK client ready");
+    // Initialize SQLite
+    getDb();
+    console.log("[max] Database initialized");
 
-  // Initialize orchestrator session
-  console.log("[max] Creating orchestrator session...");
-  await initOrchestrator(client);
-  console.log("[max] Orchestrator session ready");
+    // Start Copilot SDK client
+    console.log("[max] Starting Copilot SDK client...");
+    const client = await getClient();
+    console.log("[max] Copilot SDK client ready");
 
-  // Wire up proactive notifications — route to the originating channel
-  setProactiveNotify((text, channel) => {
-    console.log(`[max] bg-notify (${channel ?? "all"}) ⟵  ${truncate(text)}`);
-    if (!channel || channel === "telegram") {
-      if (config.telegramEnabled) sendProactiveMessage(text);
+    // Initialize orchestrator session
+    console.log("[max] Creating orchestrator session...");
+    await initOrchestrator(client);
+    console.log("[max] Orchestrator session ready");
+
+    // Wire up proactive notifications — route to the originating channel
+    setProactiveNotify((text, channel) => {
+      console.log(`[max] bg-notify (${channel ?? "all"}) ⟵  ${truncate(text)}`);
+      if (!channel || channel === "telegram") {
+        if (config.telegramEnabled) sendProactiveMessage(text);
+      }
+      if (!channel || channel === "tui") {
+        broadcastToSSE(text);
+      }
+    });
+
+    // Start HTTP API for TUI
+    await startApiServer();
+
+    // Start Telegram bot (if configured)
+    if (config.telegramEnabled) {
+      createBot();
+      await startBot();
+    } else if (!config.telegramBotToken && config.authorizedUserId === undefined) {
+      console.log("[max] Telegram not configured — skipping bot. Run 'max setup' to configure.");
+    } else if (!config.telegramBotToken) {
+      console.log("[max] Telegram bot token missing — skipping bot. Run 'max setup' and enter your bot token.");
+    } else {
+      console.log("[max] Telegram user ID missing — skipping bot. Run 'max setup' and enter your Telegram user ID (get it from @userinfobot).");
     }
-    if (!channel || channel === "tui") {
-      broadcastToSSE(text);
+
+    console.log("[max] Max is fully operational.");
+
+    // Non-blocking update check
+    checkForUpdate()
+      .then(({ updateAvailable, current, latest }) => {
+        if (updateAvailable) {
+          console.log(`[max] ⬆ Update available: v${current} → v${latest}  —  run 'max update' to install`);
+        }
+      })
+      .catch(() => {});  // silent — network may be unavailable
+
+    // Notify user if this is a restart (not a fresh start)
+    if (config.telegramEnabled && process.env.MAX_RESTARTED === "1") {
+      await sendProactiveMessage("I'm back online 🟢").catch(() => {});
+      delete process.env.MAX_RESTARTED;
     }
-  });
+  } catch (error) {
+    await stopServices({ sendTelegramStop: false });
+    releaseInstanceLock();
+    throw error;
+  }
+}
 
-  // Start HTTP API for TUI
-  await startApiServer();
-
-  // Start Telegram bot (if configured)
+async function stopServices(options: { sendTelegramStop: boolean }): Promise<void> {
   if (config.telegramEnabled) {
-    createBot();
-    await startBot();
-  } else if (!config.telegramBotToken && config.authorizedUserId === undefined) {
-    console.log("[max] Telegram not configured — skipping bot. Run 'max setup' to configure.");
-  } else if (!config.telegramBotToken) {
-    console.log("[max] Telegram bot token missing — skipping bot. Run 'max setup' and enter your bot token.");
-  } else {
-    console.log("[max] Telegram user ID missing — skipping bot. Run 'max setup' and enter your Telegram user ID (get it from @userinfobot).");
+    try { await stopBot(); } catch { /* best effort */ }
   }
 
-  console.log("[max] Max is fully operational.");
+  await stopApiServer().catch(() => {});
 
-  // Non-blocking update check
-  checkForUpdate()
-    .then(({ updateAvailable, current, latest }) => {
-      if (updateAvailable) {
-        console.log(`[max] ⬆ Update available: v${current} → v${latest}  —  run 'max update' to install`);
-      }
-    })
-    .catch(() => {});  // silent — network may be unavailable
+  const workers = getWorkers();
+  await Promise.allSettled(
+    Array.from(workers.values()).map((w) => w.session.destroy())
+  );
+  workers.clear();
 
-  // Notify user if this is a restart (not a fresh start)
-  if (config.telegramEnabled && process.env.MAX_RESTARTED === "1") {
-    await sendProactiveMessage("I'm back online 🟢").catch(() => {});
-    delete process.env.MAX_RESTARTED;
+  try { await stopClient(); } catch { /* best effort */ }
+  closeDb();
+}
+
+function releaseInstanceLock(): void {
+  if (!instanceLock) return;
+  try {
+    try {
+      instanceLock.release();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[max] Could not release daemon lock cleanly: ${message}`);
+    }
+  } finally {
+    instanceLock = undefined;
   }
 }
 
@@ -108,23 +152,14 @@ async function shutdown(): Promise<void> {
 
   // Force exit after 3 seconds no matter what
   const forceTimer = setTimeout(() => {
+    releaseInstanceLock();
     console.log("[max] Shutdown timed out — forcing exit.");
     process.exit(1);
   }, 3000);
   forceTimer.unref();
 
-  if (config.telegramEnabled) {
-    try { await stopBot(); } catch { /* best effort */ }
-  }
-
-  // Destroy all active worker sessions to free memory
-  await Promise.allSettled(
-    Array.from(workers.values()).map((w) => w.session.destroy())
-  );
-  workers.clear();
-
-  try { await stopClient(); } catch { /* best effort */ }
-  closeDb();
+  await stopServices({ sendTelegramStop: true });
+  releaseInstanceLock();
   console.log("[max] Goodbye.");
   process.exit(0);
 }
@@ -141,17 +176,10 @@ export async function restartDaemon(): Promise<void> {
 
   if (config.telegramEnabled) {
     await sendProactiveMessage("Restarting — back in a sec ⏳").catch(() => {});
-    try { await stopBot(); } catch { /* best effort */ }
   }
 
-  // Destroy all active worker sessions to free memory
-  await Promise.allSettled(
-    Array.from(activeWorkers.values()).map((w) => w.session.destroy())
-  );
-  activeWorkers.clear();
-
-  try { await stopClient(); } catch { /* best effort */ }
-  closeDb();
+  await stopServices({ sendTelegramStop: true });
+  releaseInstanceLock();
 
   // Spawn a detached replacement process with the same args (include execArgv for tsx/loaders)
   const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
@@ -167,17 +195,20 @@ export async function restartDaemon(): Promise<void> {
 
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
+process.on("exit", releaseInstanceLock);
 
 // Prevent unhandled errors from crashing the daemon
 process.on("unhandledRejection", (reason) => {
   console.error("[max] Unhandled rejection (kept alive):", reason);
 });
 process.on("uncaughtException", (err) => {
+  releaseInstanceLock();
   console.error("[max] Uncaught exception — shutting down:", err);
   process.exit(1);
 });
 
 main().catch((err) => {
+  releaseInstanceLock();
   console.error("[max] Fatal error:", err);
   process.exit(1);
 });

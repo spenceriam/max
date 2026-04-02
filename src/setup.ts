@@ -2,6 +2,13 @@ import * as readline from "readline";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { CopilotClient } from "@github/copilot-sdk";
 import { ensureMaxHome, ENV_PATH, MAX_HOME } from "./paths.js";
+import {
+  describeAutostartMode,
+  disableAutostart,
+  enableAutostart,
+  getSupportedAutostartMode,
+} from "./autostart/index.js";
+import { persistAutostart } from "./config.js";
 
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -275,8 +282,68 @@ ${BOLD}╔═══════════════════════�
   if (userId) lines.push(`AUTHORIZED_USER_ID=${userId}`);
   lines.push(`API_PORT=${apiPort}`);
   lines.push(`COPILOT_MODEL=${model}`);
+  if (existing.AUTOSTART_ENABLED) lines.push(`AUTOSTART_ENABLED=${existing.AUTOSTART_ENABLED}`);
+  if (existing.AUTOSTART_MODE) lines.push(`AUTOSTART_MODE=${existing.AUTOSTART_MODE}`);
 
   writeFileSync(ENV_PATH, lines.join("\n") + "\n");
+
+  // ── Automatic startup ────────────────────────────────────
+  const supportedAutostartMode = getSupportedAutostartMode();
+  const autostartWasEnabled = existing.AUTOSTART_ENABLED === "1";
+  let autostartEnabled = autostartWasEnabled;
+  let autostartNote = "Start Max manually with: max start";
+
+  console.log(`\n${BOLD}━━━ Automatic Startup ━━━${RESET}\n`);
+  if (supportedAutostartMode) {
+    const autostartLabel = describeAutostartMode(supportedAutostartMode);
+    console.log(`Max can register itself with ${BOLD}${autostartLabel}${RESET} so it starts`);
+    console.log(`automatically when you log in. Manual start will still work whenever you want.`);
+    console.log();
+
+    const enableOnLogin = await askYesNo(
+      rl,
+      "Would you like Max to start automatically when you log in?",
+      autostartWasEnabled
+    );
+
+    try {
+      if (enableOnLogin) {
+        const result = await enableAutostart();
+        autostartEnabled = true;
+        autostartNote = result.summary;
+        console.log(`\n${GREEN}  ✓ ${result.summary}${RESET}`);
+        for (const detail of result.details) {
+          console.log(`  ${DIM}${detail}${RESET}`);
+        }
+      } else if (autostartWasEnabled) {
+        const result = await disableAutostart();
+        autostartEnabled = false;
+        autostartNote = result.summary;
+        console.log(`\n${GREEN}  ✓ ${result.summary}${RESET}`);
+        for (const detail of result.details) {
+          console.log(`  ${DIM}${detail}${RESET}`);
+        }
+      } else {
+        persistAutostart(false, "manual");
+        autostartEnabled = false;
+        autostartNote = "Autostart left disabled. Use 'max start' to launch Max manually.";
+        console.log(`\n${DIM}  Autostart left disabled. You can enable it later with: max autostart enable${RESET}`);
+      }
+    } catch (error) {
+      autostartEnabled = autostartWasEnabled;
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`\n${YELLOW}  Could not configure automatic startup: ${message}${RESET}`);
+      console.log(`${DIM}  You can retry later with: max autostart enable${RESET}`);
+      autostartNote = `Autostart was not changed: ${message}`;
+    }
+    console.log();
+  } else {
+    persistAutostart(false, "manual");
+    autostartEnabled = false;
+    autostartNote = `Autostart is not supported on ${process.platform} yet.`;
+    console.log(`${DIM}Automatic startup isn't supported on ${process.platform} yet.${RESET}`);
+    console.log(`${DIM}Start Max manually with: max start${RESET}\n`);
+  }
 
   // ── Done ─────────────────────────────────────────────────
   console.log(`
@@ -288,8 +355,8 @@ ${BOLD}Get started:${RESET}
   ${CYAN}1.${RESET} Make sure Copilot CLI is authenticated:
      ${BOLD}copilot login${RESET}
 
-  ${CYAN}2.${RESET} Start Max:
-     ${BOLD}max start${RESET}
+  ${CYAN}2.${RESET} ${autostartEnabled ? "Automatic startup:" : "Start Max:"}
+     ${BOLD}${autostartEnabled ? autostartNote : "max start"}${RESET}
 
   ${CYAN}3.${RESET} ${setupTelegram ? "Open Telegram and message your bot!" : "Connect via terminal:"}
      ${BOLD}${setupTelegram ? "(message your bot on Telegram)" : "max tui"}${RESET}

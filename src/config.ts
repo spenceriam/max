@@ -2,10 +2,11 @@ import { config as loadEnv } from "dotenv";
 import { z } from "zod";
 import { readFileSync, writeFileSync } from "fs";
 import { ENV_PATH, ensureMaxHome } from "./paths.js";
+import type { PersistedAutostartMode } from "./autostart/types.js";
 
 // Load from ~/.max/.env, fall back to cwd .env for dev
-loadEnv({ path: ENV_PATH });
-loadEnv(); // also check cwd for backwards compat
+loadEnv({ path: ENV_PATH, quiet: true });
+loadEnv({ quiet: true }); // also check cwd for backwards compat
 
 const configSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),
@@ -13,6 +14,8 @@ const configSchema = z.object({
   API_PORT: z.string().optional(),
   COPILOT_MODEL: z.string().optional(),
   WORKER_TIMEOUT: z.string().optional(),
+  AUTOSTART_ENABLED: z.string().optional(),
+  AUTOSTART_MODE: z.string().optional(),
 });
 
 const raw = configSchema.parse(process.env);
@@ -41,6 +44,8 @@ if (!Number.isInteger(parsedWorkerTimeout) || parsedWorkerTimeout <= 0) {
 export const DEFAULT_MODEL = "claude-sonnet-4.6";
 
 let _copilotModel = raw.COPILOT_MODEL || DEFAULT_MODEL;
+let _autostartEnabled = raw.AUTOSTART_ENABLED === "1";
+let _autostartMode = normalizeAutostartMode(raw.AUTOSTART_MODE);
 
 export const config = {
   telegramBotToken: raw.TELEGRAM_BOT_TOKEN,
@@ -52,6 +57,12 @@ export const config = {
   },
   set copilotModel(model: string) {
     _copilotModel = model;
+  },
+  get autostartEnabled(): boolean {
+    return _autostartEnabled;
+  },
+  get autostartMode(): PersistedAutostartMode {
+    return _autostartMode;
   },
   get telegramEnabled(): boolean {
     return !!this.telegramBotToken && this.authorizedUserId !== undefined;
@@ -85,5 +96,39 @@ function persistEnvVar(key: string, value: string): void {
 
 /** Persist the current model choice to ~/.max/.env */
 export function persistModel(model: string): void {
+  _copilotModel = model;
   persistEnvVar("COPILOT_MODEL", model);
+}
+
+export function persistConfigValue(key: string, value: string): void {
+  switch (key) {
+    case "COPILOT_MODEL":
+      _copilotModel = value;
+      break;
+    case "AUTOSTART_ENABLED":
+      _autostartEnabled = value === "1";
+      break;
+    case "AUTOSTART_MODE":
+      _autostartMode = normalizeAutostartMode(value);
+      break;
+    default:
+      break;
+  }
+
+  persistEnvVar(key, value);
+}
+
+export function persistAutostart(
+  enabled: boolean,
+  mode: PersistedAutostartMode
+): void {
+  _autostartEnabled = enabled;
+  _autostartMode = enabled ? mode : "manual";
+  persistEnvVar("AUTOSTART_ENABLED", enabled ? "1" : "0");
+  persistEnvVar("AUTOSTART_MODE", enabled ? mode : "manual");
+}
+
+function normalizeAutostartMode(value: string | undefined): PersistedAutostartMode {
+  if (value === "systemd" || value === "windows-task") return value;
+  return "manual";
 }

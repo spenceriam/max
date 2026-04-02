@@ -26,6 +26,15 @@ export const TUI_DEBUG_LOG_PATH = join(MAX_HOME, "tui-debug.log");
 /** Path to the API bearer token file */
 export const API_TOKEN_PATH = join(MAX_HOME, "api-token");
 
+/** Path to the daemon single-instance lock file */
+export const DAEMON_LOCK_PATH = join(MAX_HOME, "daemon.lock");
+
+/** Path to the systemd user services directory */
+export const SYSTEMD_USER_DIR = join(homedir(), ".config", "systemd", "user");
+
+/** Path to the Max systemd user service file */
+export const SYSTEMD_SERVICE_PATH = join(SYSTEMD_USER_DIR, "max.service");
+
 /** Ensure ~/.max/ exists */
 export function ensureMaxHome(): void {
   mkdirSync(MAX_HOME, { recursive: true });
