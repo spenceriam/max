@@ -1,5 +1,6 @@
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
+import type { Server } from "http";
 import { readFileSync, writeFileSync, existsSync } from "fs";
 import { randomBytes } from "crypto";
 import { sendToOrchestrator, getWorkers, cancelCurrentMessage, getLastRouteResult } from "../copilot/orchestrator.js";
@@ -9,7 +10,11 @@ import { getRouterConfig, updateRouterConfig } from "../copilot/router.js";
 import { searchMemories } from "../store/db.js";
 import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
+import { getAutostartStatus } from "../autostart/index.js";
+import { checkForUpdate, getLocalVersion } from "../update.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
+import { runDoctor } from "../doctor.js";
+import { getDashboardHtml } from "./dashboard.js";
 
 // Ensure token file exists (generate on first run)
 let apiToken: string | null = null;
@@ -29,9 +34,9 @@ try {
 const app = express();
 app.use(express.json());
 
-// Bearer token authentication middleware (skip /status health check)
+// Bearer token authentication middleware (skip public health/dashboard routes)
 app.use((req: Request, res: Response, next: NextFunction) => {
-  if (!apiToken || req.path === "/status" || req.path === "/send-photo") return next();
+  if (!apiToken || req.path === "/status" || req.path === "/dashboard") return next();
   const auth = req.headers.authorization;
   if (!auth || auth !== `Bearer ${apiToken}`) {
     res.status(401).json({ error: "Unauthorized" });
@@ -43,6 +48,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Active SSE connections
 const sseClients = new Map<string, Response>();
 let connectionCounter = 0;
+let server: Server | undefined;
 
 // Health check
 app.get("/status", (_req: Request, res: Response) => {
@@ -54,6 +60,34 @@ app.get("/status", (_req: Request, res: Response) => {
       status: w.status,
     })),
   });
+});
+
+app.get("/info", async (_req: Request, res: Response) => {
+  const update = await checkForUpdate().catch(() => null);
+  res.json({
+    pid: process.pid,
+    version: getLocalVersion(),
+    apiPort: config.apiPort,
+    model: config.copilotModel,
+    telegramEnabled: config.telegramEnabled,
+    autostartEnabled: config.autostartEnabled,
+    autostartMode: config.autostartMode,
+    update,
+  });
+});
+
+app.get("/autostart", async (_req: Request, res: Response) => {
+  const status = await getAutostartStatus();
+  res.json(status);
+});
+
+app.get("/doctor", async (_req: Request, res: Response) => {
+  const report = await runDoctor();
+  res.json(report);
+});
+
+app.get("/dashboard", (_req: Request, res: Response) => {
+  res.type("html").send(getDashboardHtml());
 });
 
 // List worker sessions
@@ -256,12 +290,15 @@ app.post("/send-photo", async (req: Request, res: Response) => {
 });
 
 export function startApiServer(): Promise<void> {
+  if (server) return Promise.resolve();
+
   return new Promise((resolve, reject) => {
-    const server = app.listen(config.apiPort, "127.0.0.1", () => {
+    server = app.listen(config.apiPort, "127.0.0.1", () => {
       console.log(`[max] HTTP API listening on http://127.0.0.1:${config.apiPort}`);
       resolve();
     });
     server.on("error", (err: NodeJS.ErrnoException) => {
+      server = undefined;
       if (err.code === "EADDRINUSE") {
         reject(new Error(`Port ${config.apiPort} is already in use. Is another Max instance running?`));
       } else {
@@ -278,4 +315,23 @@ export function broadcastToSSE(text: string): void {
       `data: ${JSON.stringify({ type: "message", content: text })}\n\n`
     );
   }
+}
+
+export function stopApiServer(): Promise<void> {
+  if (!server) return Promise.resolve();
+
+  const activeServer = server;
+  server = undefined;
+
+  for (const [, res] of sseClients) {
+    res.end();
+  }
+  sseClients.clear();
+
+  return new Promise((resolve, reject) => {
+    activeServer.close((err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
 }
