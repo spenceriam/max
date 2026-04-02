@@ -331,7 +331,9 @@ export function getDashboardHtml(): string {
         streamAbort: null,
         currentAssistantNode: null,
         intervals: [],
-        routerEnabled: false
+        routerEnabled: false,
+        lightRefreshPromise: null,
+        doctorRefreshPromise: null
       };
 
       const login = document.getElementById("login");
@@ -493,50 +495,91 @@ export function getDashboardHtml(): string {
       }
 
       async function refreshDoctor() {
-        const response = await api("/doctor");
-        const report = await response.json();
-        document.getElementById("doctor-summary").textContent =
-          report.summary.ok + " ok · " + report.summary.warn + " warn · " + report.summary.fail + " fail";
-        const list = document.getElementById("doctor-list");
-        list.innerHTML = "";
-        report.checks.forEach(function (check) {
-          if (check.level === "ok") return;
-          const item = document.createElement("div");
-          item.className = "list-item";
-          const title = document.createElement("strong");
-          title.textContent = check.label + " · " + check.level;
-          const detail = document.createElement("div");
-          detail.className = "muted";
-          detail.textContent = check.detail;
-          item.appendChild(title);
-          item.appendChild(detail);
-          list.appendChild(item);
-        });
-        if (!list.childNodes.length) {
-          const empty = document.createElement("div");
-          empty.className = "muted";
-          empty.textContent = "No doctor warnings right now.";
-          list.appendChild(empty);
+        if (state.doctorRefreshPromise) {
+          return state.doctorRefreshPromise;
+        }
+
+        state.doctorRefreshPromise = (async function () {
+          try {
+            const response = await api("/doctor");
+            const report = await response.json();
+            document.getElementById("doctor-summary").textContent =
+              report.summary.ok + " ok · " + report.summary.warn + " warn · " + report.summary.fail + " fail";
+            const list = document.getElementById("doctor-list");
+            list.innerHTML = "";
+            report.checks.forEach(function (check) {
+              if (check.level === "ok") return;
+              const item = document.createElement("div");
+              item.className = "list-item";
+              const title = document.createElement("strong");
+              title.textContent = check.label + " · " + check.level;
+              const detail = document.createElement("div");
+              detail.className = "muted";
+              detail.textContent = check.detail;
+              item.appendChild(title);
+              item.appendChild(detail);
+              list.appendChild(item);
+            });
+            if (!list.childNodes.length) {
+              const empty = document.createElement("div");
+              empty.className = "muted";
+              empty.textContent = "No doctor warnings right now.";
+              list.appendChild(empty);
+            }
+          } catch (error) {
+            if (error.message === "Unauthorized") {
+              return;
+            }
+            document.getElementById("doctor-summary").textContent = "Doctor refresh unavailable.";
+            const list = document.getElementById("doctor-list");
+            list.innerHTML = "";
+            const item = document.createElement("div");
+            item.className = "muted";
+            item.textContent = "Last doctor refresh failed: " + error.message;
+            list.appendChild(item);
+          }
+        }());
+
+        try {
+          await state.doctorRefreshPromise;
+        } finally {
+          state.doctorRefreshPromise = null;
+        }
+      }
+
+      async function refreshLight() {
+        if (state.lightRefreshPromise) {
+          return state.lightRefreshPromise;
+        }
+
+        state.lightRefreshPromise = (async function () {
+          try {
+            await Promise.all([
+              refreshInfo(),
+              refreshAutostart(),
+              refreshRouter(),
+              refreshSessions(),
+              refreshSkills()
+            ]);
+            state.connected = true;
+            setBadge("badge-daemon", state.connectionId ? "daemon: connected" : "daemon: waiting for stream", state.connectionId ? "ok" : "warn");
+          } catch (error) {
+            if (error.message !== "Unauthorized") {
+              setBadge("badge-daemon", "daemon: unavailable", "fail");
+            }
+          }
+        }());
+
+        try {
+          await state.lightRefreshPromise;
+        } finally {
+          state.lightRefreshPromise = null;
         }
       }
 
       async function refreshAll() {
-        try {
-          await Promise.all([
-            refreshInfo(),
-            refreshAutostart(),
-            refreshRouter(),
-            refreshSessions(),
-            refreshSkills(),
-            refreshDoctor()
-          ]);
-          state.connected = true;
-          setBadge("badge-daemon", state.connectionId ? "daemon: connected" : "daemon: waiting for stream", state.connectionId ? "ok" : "warn");
-        } catch (error) {
-          if (error.message !== "Unauthorized") {
-            setBadge("badge-daemon", "daemon: unavailable", "fail");
-          }
-        }
+        await refreshLight();
+        await refreshDoctor();
       }
 
       async function connectStream() {
@@ -725,7 +768,8 @@ export function getDashboardHtml(): string {
       function startIntervals() {
         state.intervals.forEach(clearInterval);
         state.intervals = [
-          setInterval(refreshAll, 15000),
+          setInterval(refreshLight, 15000),
+          setInterval(refreshDoctor, 60000),
           setInterval(refreshSessions, 5000)
         ];
       }

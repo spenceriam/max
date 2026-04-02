@@ -18,6 +18,7 @@ export async function getWindowsAutostartStatus(): Promise<AutostartStatus> {
     const { stdout } = await runPowerShell(buildStatusScript());
     const status = JSON.parse(stdout) as {
       exists: boolean;
+      enabled?: boolean;
       state?: string;
       taskName?: string;
     };
@@ -33,14 +34,19 @@ export async function getWindowsAutostartStatus(): Promise<AutostartStatus> {
       };
     }
 
+    const enabled = status.enabled !== false;
+
     return {
       supported: true,
-      enabled: true,
+      enabled,
       mode: "windows-task",
       artifactPath: WINDOWS_TASK_ARTIFACT,
-      summary: "Autostart is enabled via Windows Task Scheduler.",
+      summary: enabled
+        ? "Autostart is enabled via Windows Task Scheduler."
+        : "Autostart scheduled task exists, but it is disabled.",
       details: [
         `Scheduled task: ${status.taskName ?? WINDOWS_TASK_NAME}`,
+        `Task enabled: ${enabled ? "yes" : "no"}`,
         `Task state: ${status.state ?? "unknown"}`,
       ],
     };
@@ -163,6 +169,7 @@ function buildStatusScript(): string {
     "$result = @{",
     "  exists = $true",
     "  taskName = $task.TaskName",
+    "  enabled = [bool]$task.Settings.Enabled",
     "  state = $task.State.ToString()",
     "}",
     "$result | ConvertTo-Json -Compress",
