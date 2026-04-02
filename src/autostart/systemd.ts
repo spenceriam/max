@@ -198,7 +198,7 @@ function buildServiceFile(execStart: string): string {
     "WorkingDirectory=%h",
     "Environment=HOME=%h",
     `ExecStart=${execStart}`,
-    "Restart=on-failure",
+    "Restart=always",
     "RestartSec=5",
     "",
     "[Install]",
