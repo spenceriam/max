@@ -629,6 +629,9 @@ export function getDashboardHtml(): string {
           }
         } catch (error) {
           if (error.name !== "AbortError") {
+            state.connectionId = null;
+            state.currentAssistantNode = null;
+            setBusy(false);
             appendMessage("sys", "Stream disconnected. Reconnecting...", "system");
             setBadge("badge-daemon", "daemon: reconnecting", "warn");
             setTimeout(connectStream, 2000);
