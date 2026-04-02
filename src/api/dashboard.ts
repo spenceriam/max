@@ -390,6 +390,17 @@ export function getDashboardHtml(): string {
         setBusy(false);
       }
 
+      function abortStream(resetState) {
+        if (!state.streamAbort) {
+          if (resetState) resetStreamState();
+          return;
+        }
+        const activeAbort = state.streamAbort;
+        state.streamAbort = null;
+        if (resetState) resetStreamState();
+        activeAbort.abort();
+      }
+
       function setBadge(id, label, tone) {
         const node = document.getElementById(id);
         node.textContent = label;
@@ -605,14 +616,15 @@ export function getDashboardHtml(): string {
         if (!state.token) return;
 
         if (state.streamAbort) {
-          state.streamAbort.abort();
+          abortStream(true);
         }
-        state.streamAbort = new AbortController();
+        const streamAbort = new AbortController();
+        state.streamAbort = streamAbort;
 
         try {
           const response = await fetch("/stream", {
             headers: authHeaders(),
-            signal: state.streamAbort.signal,
+            signal: streamAbort.signal,
             cache: "no-store"
           });
           if (response.status === 401) {
@@ -641,8 +653,10 @@ export function getDashboardHtml(): string {
             }
           }
         } catch (error) {
-          if (error.name !== "AbortError") {
+          if (state.streamAbort === streamAbort) {
             resetStreamState();
+          }
+          if (error.name !== "AbortError") {
             appendMessage("sys", "Stream disconnected. Reconnecting...", "system");
             setBadge("badge-daemon", "daemon: reconnecting", "warn");
             setTimeout(connectStream, 2000);
@@ -782,11 +796,7 @@ export function getDashboardHtml(): string {
 
       function clearStoredToken() {
         state.token = "";
-        state.connectionId = null;
-        if (state.streamAbort) {
-          state.streamAbort.abort();
-          state.streamAbort = null;
-        }
+        abortStream(true);
         stopIntervals();
         sessionStorage.removeItem("maxApiToken");
         localStorage.removeItem("maxApiToken");
