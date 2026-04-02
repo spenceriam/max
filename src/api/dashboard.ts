@@ -377,6 +377,19 @@ export function getDashboardHtml(): string {
         cancelButton.disabled = !nextBusy;
       }
 
+      function resetStreamState() {
+        state.connectionId = null;
+        if (state.currentAssistantNode) {
+          const metaNode = state.currentAssistantNode.parentNode && state.currentAssistantNode.parentNode.querySelector(".meta");
+          if (metaNode && metaNode.textContent === "max · streaming") {
+            metaNode.textContent = "max";
+          }
+        }
+        state.currentAssistantNode = null;
+        state.streamAbort = null;
+        setBusy(false);
+      }
+
       function setBadge(id, label, tone) {
         const node = document.getElementById(id);
         node.textContent = label;
@@ -629,9 +642,7 @@ export function getDashboardHtml(): string {
           }
         } catch (error) {
           if (error.name !== "AbortError") {
-            state.connectionId = null;
-            state.currentAssistantNode = null;
-            setBusy(false);
+            resetStreamState();
             appendMessage("sys", "Stream disconnected. Reconnecting...", "system");
             setBadge("badge-daemon", "daemon: reconnecting", "warn");
             setTimeout(connectStream, 2000);

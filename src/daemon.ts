@@ -116,7 +116,12 @@ async function stopServices(options: { sendTelegramStop: boolean }): Promise<voi
 function releaseInstanceLock(): void {
   if (!instanceLock) return;
   try {
-    instanceLock.release();
+    try {
+      instanceLock.release();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[max] Could not release daemon lock cleanly: ${message}`);
+    }
   } finally {
     instanceLock = undefined;
   }
