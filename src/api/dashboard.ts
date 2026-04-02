@@ -615,7 +615,9 @@ export function getDashboardHtml(): string {
           let buffer = "";
           while (true) {
             const result = await reader.read();
-            if (result.done) break;
+            if (result.done) {
+              throw new Error("Stream ended");
+            }
             buffer += decoder.decode(result.value, { stream: true });
             let boundary = buffer.indexOf("\\n\\n");
             while (boundary !== -1) {

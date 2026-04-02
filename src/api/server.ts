@@ -37,7 +37,7 @@ app.use(express.json());
 
 // Bearer token authentication middleware (skip public health/dashboard routes)
 app.use((req: Request, res: Response, next: NextFunction) => {
-  if (!apiToken || req.path === "/status" || req.path === "/dashboard") return next();
+  if (!apiToken || req.path === "/status" || req.path === "/dashboard" || req.path === "/dashboard/") return next();
   const auth = req.headers.authorization;
   if (!auth || auth !== `Bearer ${apiToken}`) {
     res.status(401).json({ error: "Unauthorized" });
