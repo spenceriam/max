@@ -23,6 +23,7 @@ max setup
 ```
 
 This creates `~/.max/` and walks you through configuration (Telegram bot token, etc.). Telegram is optional — you can use Max with just the terminal UI.
+At the end of setup, Max can also register itself to start automatically when you log in.
 
 ### 2. Make sure Copilot CLI is authenticated
 
@@ -61,8 +62,39 @@ From Telegram or the TUI, just send natural language:
 | `max start` | Start the Max daemon |
 | `max tui` | Connect to the daemon via terminal |
 | `max setup` | Interactive first-run configuration |
+| `max config` | Show or change saved configuration |
+| `max autostart` | Enable, disable, or inspect automatic startup |
+| `max doctor` | Run installation and runtime diagnostics |
 | `max update` | Check for and install updates |
 | `max help` | Show available commands |
+
+## VPS / Command Center
+
+Max still binds its API to `127.0.0.1` by default. For VPS use, keep that default and access Max through:
+
+```bash
+ssh -L 7777:127.0.0.1:7777 your-vps
+```
+
+Then open:
+
+```text
+http://127.0.0.1:7777/dashboard
+```
+
+Use the token from:
+
+```bash
+max config show-token
+```
+
+If you want browser access without SSH tunneling, put an HTTPS reverse proxy in front of Max and keep the daemon itself bound to localhost.
+
+If you validate the dashboard with Vercel's `agent-browser` on a Linux VPS or container, Chromium may require:
+
+```bash
+agent-browser --args "--no-sandbox" open http://127.0.0.1:7777/dashboard
+```
 
 ### Flags
 
