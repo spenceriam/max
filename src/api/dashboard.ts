@@ -383,7 +383,13 @@ export function getDashboardHtml(): string {
         node.className = "badge" + (tone ? " " + tone : "");
       }
 
+      function stopIntervals() {
+        state.intervals.forEach(clearInterval);
+        state.intervals = [];
+      }
+
       function showLogin(message) {
+        stopIntervals();
         login.classList.add("show");
         loginError.textContent = message || "";
         tokenInput.focus();
@@ -761,12 +767,17 @@ export function getDashboardHtml(): string {
       function clearStoredToken() {
         state.token = "";
         state.connectionId = null;
+        if (state.streamAbort) {
+          state.streamAbort.abort();
+          state.streamAbort = null;
+        }
+        stopIntervals();
         sessionStorage.removeItem("maxApiToken");
         localStorage.removeItem("maxApiToken");
       }
 
       function startIntervals() {
-        state.intervals.forEach(clearInterval);
+        stopIntervals();
         state.intervals = [
           setInterval(refreshLight, 15000),
           setInterval(refreshDoctor, 60000),
@@ -785,8 +796,8 @@ export function getDashboardHtml(): string {
         }
         state.booted = true;
         await refreshAll();
-        await connectStream();
         startIntervals();
+        void connectStream();
       }
 
       loginForm.addEventListener("submit", function (event) {

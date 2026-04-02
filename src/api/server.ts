@@ -12,6 +12,7 @@ import { listSkills, removeSkill } from "../copilot/skills.js";
 import { restartDaemon } from "../daemon.js";
 import { getAutostartStatus } from "../autostart/index.js";
 import { checkForUpdate, getLocalVersion } from "../update.js";
+import type { UpdateCheckResult } from "../update.js";
 import { API_TOKEN_PATH, ensureMaxHome } from "../paths.js";
 import { runDoctor } from "../doctor.js";
 import { getDashboardHtml } from "./dashboard.js";
@@ -49,6 +50,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 const sseClients = new Map<string, Response>();
 let connectionCounter = 0;
 let server: Server | undefined;
+const UPDATE_CACHE_TTL_MS = 5 * 60_000;
+let cachedUpdateStatus: UpdateCheckResult | null = null;
+let cachedUpdateFetchedAt = 0;
+let cachedUpdatePromise: Promise<void> | null = null;
+
+refreshUpdateCache();
 
 // Health check
 app.get("/status", (_req: Request, res: Response) => {
@@ -62,8 +69,8 @@ app.get("/status", (_req: Request, res: Response) => {
   });
 });
 
-app.get("/info", async (_req: Request, res: Response) => {
-  const update = await checkForUpdate().catch(() => null);
+app.get("/info", (_req: Request, res: Response) => {
+  refreshUpdateCache();
   res.json({
     pid: process.pid,
     version: getLocalVersion(),
@@ -72,7 +79,7 @@ app.get("/info", async (_req: Request, res: Response) => {
     telegramEnabled: config.telegramEnabled,
     autostartEnabled: config.autostartEnabled,
     autostartMode: config.autostartMode,
-    update,
+    update: cachedUpdateStatus,
   });
 });
 
@@ -334,4 +341,26 @@ export function stopApiServer(): Promise<void> {
       else resolve();
     });
   });
+}
+
+function refreshUpdateCache(): void {
+  const cacheIsFresh =
+    cachedUpdateFetchedAt > 0 &&
+    Date.now() - cachedUpdateFetchedAt < UPDATE_CACHE_TTL_MS;
+
+  if (cacheIsFresh || cachedUpdatePromise) {
+    return;
+  }
+
+  cachedUpdatePromise = checkForUpdate()
+    .then((result) => {
+      cachedUpdateStatus = result;
+      cachedUpdateFetchedAt = Date.now();
+    })
+    .catch(() => {
+      cachedUpdateFetchedAt = Date.now();
+    })
+    .finally(() => {
+      cachedUpdatePromise = null;
+    });
 }
