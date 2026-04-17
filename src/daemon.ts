@@ -2,12 +2,56 @@ import { getClient, stopClient } from "./copilot/client.js";
 import { initOrchestrator, setMessageLogger, setProactiveNotify, getWorkers } from "./copilot/orchestrator.js";
 import { startApiServer, broadcastToSSE } from "./api/server.js";
 import { createBot, startBot, stopBot, sendProactiveMessage } from "./telegram/bot.js";
-import { getDb, closeDb } from "./store/db.js";
+import { getDb, closeDb, getState } from "./store/db.js";
 import { config } from "./config.js";
 import { spawn } from "child_process";
+import { readdirSync, statSync, rmSync } from "fs";
+import { join } from "path";
 import { checkForUpdate } from "./update.js";
 import { ensureWikiStructure } from "./wiki/fs.js";
 import { shouldMigrate, migrateMemoriesToWiki, shouldReorganize, reorganizeWiki } from "./wiki/migrate.js";
+import { SESSIONS_DIR } from "./paths.js";
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Remove orphaned session folders older than 7 days, preserving the current session. */
+function pruneOldSessions(): void {
+  try {
+    const sessionStateDir = join(SESSIONS_DIR, "session-state");
+    const currentSessionId = getState("orchestrator_session_id");
+
+    let entries: string[];
+    try {
+      entries = readdirSync(sessionStateDir);
+    } catch {
+      return; // directory may not exist yet
+    }
+
+    const cutoff = Date.now() - SEVEN_DAYS_MS;
+    let pruned = 0;
+
+    for (const entry of entries) {
+      if (entry === currentSessionId) continue;
+
+      const fullPath = join(sessionStateDir, entry);
+      try {
+        const stat = statSync(fullPath);
+        if (stat.isDirectory() && stat.mtimeMs < cutoff) {
+          rmSync(fullPath, { recursive: true, force: true });
+          pruned++;
+        }
+      } catch {
+        // skip entries we can't stat or remove
+      }
+    }
+
+    if (pruned > 0) {
+      console.log(`[max] Pruned ${pruned} orphaned session folder(s)`);
+    }
+  } catch (err) {
+    console.error("[max] Session pruning failed (non-fatal):", err instanceof Error ? err.message : err);
+  }
+}
 
 function truncate(text: string, max = 200): string {
   const oneLine = text.replace(/\n/g, " ").trim();
@@ -46,6 +90,9 @@ async function main(): Promise<void> {
     const count = reorganizeWiki();
     console.log(`[max] Created ${count} entity pages`);
   }
+
+  // Prune orphaned session folders older than 7 days
+  pruneOldSessions();
 
   // Start Copilot SDK client
   console.log("[max] Starting Copilot SDK client...");

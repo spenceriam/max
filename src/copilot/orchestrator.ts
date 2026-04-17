@@ -171,30 +171,47 @@ async function createOrResumeSession(): Promise<CopilotSession> {
     bufferExhaustionThreshold: 0.95,
   };
 
-  // Try to resume a previous session
+  // Try to resume a previous session (with retry for transient connection failures)
   const savedSessionId = getState(ORCHESTRATOR_SESSION_KEY);
   if (savedSessionId) {
-    try {
-      console.log(`[max] Resuming orchestrator session ${savedSessionId.slice(0, 8)}…`);
-      const session = await client.resumeSession(savedSessionId, {
-        model: config.copilotModel,
-        configDir: SESSIONS_DIR,
-        streaming: true,
-        systemMessage: {
-          content: getOrchestratorSystemMessage({ selfEditEnabled: config.selfEditEnabled }),
-        },
-        tools,
-        mcpServers,
-        skillDirectories,
-        onPermissionRequest: approveAll,
-        infiniteSessions,
-      });
-      console.log(`[max] Resumed orchestrator session successfully`);
-      currentSessionModel = config.copilotModel;
-      return session;
-    } catch (err) {
-      console.log(`[max] Could not resume session: ${err instanceof Error ? err.message : err}. Creating new.`);
-      deleteState(ORCHESTRATOR_SESSION_KEY);
+    const RESUME_MAX_RETRIES = 2;
+    const RESUME_RETRY_DELAY_MS = 1_000;
+
+    for (let attempt = 0; attempt <= RESUME_MAX_RETRIES; attempt++) {
+      try {
+        // Verify client is connected before each attempt
+        if (copilotClient?.getState() !== "connected") {
+          console.log(`[max] Client not connected before resume attempt ${attempt + 1}, re-ensuring…`);
+          await ensureClient();
+        }
+
+        console.log(`[max] Resuming orchestrator session ${savedSessionId.slice(0, 8)}… (attempt ${attempt + 1}/${RESUME_MAX_RETRIES + 1})`);
+        const session = await client.resumeSession(savedSessionId, {
+          model: config.copilotModel,
+          configDir: SESSIONS_DIR,
+          streaming: true,
+          systemMessage: {
+            content: getOrchestratorSystemMessage({ selfEditEnabled: config.selfEditEnabled }),
+          },
+          tools,
+          mcpServers,
+          skillDirectories,
+          onPermissionRequest: approveAll,
+          infiniteSessions,
+        });
+        console.log(`[max] Resumed orchestrator session successfully`);
+        currentSessionModel = config.copilotModel;
+        return session;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (attempt < RESUME_MAX_RETRIES) {
+          console.log(`[max] Resume attempt ${attempt + 1} failed: ${msg}. Retrying in ${RESUME_RETRY_DELAY_MS}ms…`);
+          await sleep(RESUME_RETRY_DELAY_MS);
+        } else {
+          console.log(`[max] All ${RESUME_MAX_RETRIES + 1} resume attempts failed (last error: ${msg}). Creating new session.`);
+          deleteState(ORCHESTRATOR_SESSION_KEY);
+        }
+      }
     }
   }
 
