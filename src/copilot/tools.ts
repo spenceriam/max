@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { approveAll, defineTool, type CopilotClient, type CopilotSession, type Tool } from "@github/copilot-sdk";
-import { getDb, addMemory, searchMemories, removeMemory } from "../store/db.js";
+import { getDb } from "../store/db.js";
 import { readdirSync, readFileSync, statSync } from "fs";
 import { join, sep, resolve } from "path";
 import { homedir } from "os";
@@ -12,6 +12,18 @@ import { getRouterConfig, updateRouterConfig } from "./router.js";
 import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir } from "../wiki/fs.js";
 import { searchIndex, addToIndex, removeFromIndex, parseIndex, type IndexEntry } from "../wiki/index-manager.js";
 import { appendLog } from "../wiki/log-manager.js";
+
+function getCategoryDir(category: string): string {
+  const map: Record<string, string> = {
+    person: "people",
+    project: "projects",
+    preference: "preferences",
+    fact: "facts",
+    routine: "routines",
+    decision: "decisions",
+  };
+  return map[category] || category;
+}
 
 function isTimeoutError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -488,50 +500,78 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
     defineTool("remember", {
       description:
-        "Save something to Max's wiki knowledge base. Use when the user says 'remember that...', " +
-        "states a preference, shares a fact about themselves, or mentions something important " +
-        "that should be remembered across conversations. Also use proactively when you detect " +
-        "important information worth persisting.",
+        "Save a fact, preference, or detail to the wiki. Routes to entity-specific pages automatically. " +
+        "Use for discrete facts ('Burke prefers dark mode', 'Project uses Vercel'). " +
+        "For richer knowledge pages, use wiki_update instead.",
       parameters: z.object({
-        category: z.enum(["preference", "fact", "project", "person", "routine"])
-          .describe("Category: preference (likes/dislikes/settings), fact (general knowledge), project (codebase/repo info), person (people info), routine (schedules/habits)"),
+        category: z.enum(["preference", "fact", "project", "person", "routine", "decision"])
+          .describe("Category: preference (likes/dislikes/settings), fact (general knowledge), project (codebase/repo info), person (people info), routine (schedules/habits), decision (choices made)"),
         content: z.string().describe("The thing to remember — a concise, self-contained statement"),
-        source: z.enum(["user", "auto"]).optional().describe("'user' if explicitly asked to remember, 'auto' if Max detected it (default: 'user')"),
+        entity: z.string().optional().describe("The specific entity this is about (e.g. 'burke', 'max', 'vercel'). Routes to a dedicated entity page."),
+        related: z.array(z.string()).optional().describe("Wiki page paths this connects to, for cross-referencing"),
       }),
       handler: async (args) => {
         ensureWikiStructure();
-        const categoryMap: Record<string, string> = {
-          preference: "pages/preferences.md",
-          fact: "pages/facts.md",
-          project: "pages/projects.md",
-          person: "pages/people.md",
-          routine: "pages/routines.md",
-        };
-        const pagePath = categoryMap[args.category] || `pages/${args.category}.md`;
-        const title = args.category.charAt(0).toUpperCase() + args.category.slice(1);
         const now = new Date().toISOString().slice(0, 10);
-        const tag = args.source === "auto" ? "auto" : "user";
+
+        // Entity routing: code-authoritative slugification and page lookup
+        let pagePath: string;
+        let title: string;
+        if (args.entity) {
+          const slug = args.entity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+          const categoryDir = getCategoryDir(args.category);
+          pagePath = `pages/${categoryDir}/${slug}.md`;
+
+          // Check for existing page with fuzzy match before creating new
+          const existingPages = searchIndex(args.entity, 5);
+          const existingMatch = existingPages.find((p) => {
+            const pSlug = p.path.split("/").pop()?.replace(".md", "") || "";
+            return pSlug === slug || p.title.toLowerCase() === args.entity!.toLowerCase();
+          });
+          if (existingMatch) {
+            pagePath = existingMatch.path;
+            title = existingMatch.title;
+          } else {
+            title = args.entity.split(/[-_\s]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+          }
+        } else {
+          const categoryMap: Record<string, string> = {
+            preference: "pages/preferences.md",
+            fact: "pages/facts.md",
+            project: "pages/projects.md",
+            person: "pages/people.md",
+            routine: "pages/routines.md",
+            decision: "pages/decisions.md",
+          };
+          pagePath = categoryMap[args.category] || `pages/${args.category}.md`;
+          title = args.category.charAt(0).toUpperCase() + args.category.slice(1);
+        }
 
         const existing = readPage(pagePath);
         if (existing) {
-          // Append to existing page
+          // Read-before-write: check if this info updates something existing
           const updated = existing.replace(
             /^(---[\s\S]*?updated:\s*)[\d-]+/m,
             `$1${now}`
           );
-          writePage(pagePath, updated.trimEnd() + `\n- ${args.content} _(${tag}, ${now})_\n`);
+          writePage(pagePath, updated.trimEnd() + `\n- ${args.content} _(${now})_\n`);
         } else {
+          const relatedRefs = args.related?.length
+            ? `related: [${args.related.join(", ")}]` : "related: []";
+          const tags: string[] = [args.category];
+          if (args.entity) tags.push(args.entity.toLowerCase());
           const page = [
             "---",
             `title: ${title}`,
-            `tags: [${args.category}]`,
+            `tags: [${tags.join(", ")}]`,
             `created: ${now}`,
             `updated: ${now}`,
+            relatedRefs,
             "---",
             "",
             `# ${title}`,
             "",
-            `- ${args.content} _(${tag}, ${now})_`,
+            `- ${args.content} _(${now})_`,
             "",
           ].join("\n");
           writePage(pagePath, page);
@@ -539,52 +579,49 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
         addToIndex({
           path: pagePath,
-          title: `${title}`,
-          summary: `${title} stored in Max's wiki`,
+          title,
+          summary: args.content.slice(0, 120),
           section: "Knowledge",
         });
-        appendLog("update", `remember (${args.category}): ${args.content.slice(0, 80)}`);
+        appendLog("update", `remember (${args.category}${args.entity ? `, ${args.entity}` : ""}): ${args.content.slice(0, 80)}`);
 
-        // Also write to SQLite for backwards compat during transition
-        const id = addMemory(args.category, args.content, args.source || "user");
-        return `Remembered (wiki + #${id}, ${args.category}): "${args.content}"`;
+        const relatedHint = args.related?.length
+          ? ` Related pages that may need updating: ${args.related.join(", ")}`
+          : "";
+        return `Remembered in ${pagePath}: "${args.content}"${relatedHint}`;
       },
     }),
 
     defineTool("recall", {
       description:
-        "Search Max's wiki knowledge base for stored facts, preferences, or information. " +
-        "Use when you need to look up something the user told you before, or when the user " +
-        "asks 'do you remember...?' or 'what do you know about...?'",
+        "Search the wiki for stored knowledge. Returns matching page summaries from the index. " +
+        "Use wiki_read to drill into specific pages for deeper context. " +
+        "Use when you need to look up something the user told you, or when asked 'do you remember...?'",
       parameters: z.object({
         keyword: z.string().optional().describe("Search term to match against wiki pages"),
-        category: z.enum(["preference", "fact", "project", "person", "routine"]).optional()
+        category: z.enum(["preference", "fact", "project", "person", "routine", "decision"]).optional()
           .describe("Optional: filter by category"),
       }),
       handler: async (args) => {
         ensureWikiStructure();
 
-        // Search wiki index
         const query = [args.keyword, args.category].filter(Boolean).join(" ");
-        const matches = searchIndex(query || "", 5);
+        const matches = searchIndex(query || "", 10);
 
         if (matches.length === 0) {
-          // Fall back to SQLite search for pre-migration content
-          const results = searchMemories(args.keyword, args.category);
-          if (results.length === 0) return "No matching memories found in wiki or database.";
-          const lines = results.map(
-            (m) => `• [db#${m.id}] [${m.category}] ${m.content} (${m.source}, ${m.created_at})`
-          );
-          return `Found ${results.length} in legacy database:\n${lines.join("\n")}`;
+          return "No matching memories found in the wiki. The wiki is the single source of truth — if it's not here, I don't know it yet.";
         }
 
         const sections: string[] = [];
         for (const match of matches) {
           const content = readPage(match.path);
           if (!content) continue;
+          // Extract updated date from frontmatter
+          const updatedMatch = content.match(/^updated:\s*(.+)$/m);
+          const updated = updatedMatch ? ` (updated: ${updatedMatch[1].trim()})` : "";
           const body = content.replace(/^---[\s\S]*?---\s*/, "").trim();
           const trimmed = body.length > 800 ? body.slice(0, 800) + "…" : body;
-          sections.push(`**${match.title}** (${match.path}):\n${trimmed}`);
+          sections.push(`**${match.title}** (${match.path})${updated}:\n${trimmed}`);
         }
 
         return sections.length > 0
@@ -595,53 +632,85 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
     defineTool("forget", {
       description:
-        "Remove specific content from Max's knowledge base. For wiki content, specify the " +
-        "page path and the text to remove. For legacy database entries, specify the memory_id.",
+        "Remove content from the wiki. Three modes: (1) page_path + content removes matching bullet lines, " +
+        "(2) page_path + revision replaces a section with corrected content, " +
+        "(3) page_path alone deletes the entire page.",
       parameters: z.object({
-        memory_id: z.number().int().optional().describe("Legacy database memory ID to remove"),
-        page_path: z.string().optional().describe("Wiki page path containing the content to remove"),
-        content: z.string().optional().describe("The specific text to remove from the wiki page"),
+        page_path: z.string().describe("Wiki page path to modify or delete"),
+        content: z.string().optional().describe("Specific text to match and remove (line-removal mode)"),
+        revision: z.string().optional().describe("Replacement content for a section (section-rewrite mode)"),
+        section_heading: z.string().optional().describe("The heading of the section to replace (used with revision)"),
       }),
       handler: async (args) => {
-        const results: string[] = [];
-
-        // Remove from legacy DB if ID provided
-        if (args.memory_id !== undefined) {
-          const removed = removeMemory(args.memory_id);
-          results.push(removed
-            ? `Removed db#${args.memory_id}.`
-            : `db#${args.memory_id} not found.`);
-        }
-
-        // Remove from wiki if page + content provided
-        if (args.page_path && args.content) {
+        // Delete entire page
+        if (!args.content && !args.revision) {
           const page = readPage(args.page_path);
-          if (page) {
-            const lines = page.split("\n");
-            const before = lines.length;
-            // Only remove bullet-point lines that contain the target content
-            const updated = lines
-              .filter((line) => {
-                if (line.trim().startsWith("-") && line.includes(args.content!)) {
-                  return false;
-                }
-                return true;
-              })
-              .join("\n");
-            const removed = before - updated.split("\n").length;
-            if (removed > 0) {
-              writePage(args.page_path, updated);
-              appendLog("update", `forget: removed ${removed} line(s) matching "${args.content!.slice(0, 60)}" from ${args.page_path}`);
-              results.push(`Removed ${removed} line(s) from ${args.page_path}.`);
-            } else {
-              results.push(`No matching bullet points found in ${args.page_path}.`);
-            }
-          } else {
-            results.push(`Page ${args.page_path} not found.`);
-          }
+          if (!page) return `Page ${args.page_path} not found.`;
+          deletePage(args.page_path);
+          removeFromIndex(args.page_path);
+          appendLog("delete", `forget: deleted page ${args.page_path}`);
+          return `Deleted page ${args.page_path} and removed from index.`;
         }
 
-        return results.length > 0 ? results.join(" ") : "Nothing to remove — provide memory_id or page_path + content.";
+        // Line-removal mode: remove bullet lines matching content
+        if (args.content) {
+          const page = readPage(args.page_path);
+          if (!page) return `Page ${args.page_path} not found.`;
+          const lines = page.split("\n");
+          const before = lines.length;
+          const updated = lines
+            .filter((line) => {
+              if (line.trim().startsWith("-") && line.includes(args.content!)) {
+                return false;
+              }
+              return true;
+            })
+            .join("\n");
+          const removed = before - updated.split("\n").length;
+          if (removed > 0) {
+            writePage(args.page_path, updated);
+            appendLog("update", `forget: removed ${removed} line(s) matching "${args.content!.slice(0, 60)}" from ${args.page_path}`);
+            return `Removed ${removed} line(s) from ${args.page_path}.`;
+          }
+          return `No matching bullet points found in ${args.page_path}.`;
+        }
+
+        // Section-rewrite mode: replace a section with revised content
+        if (args.revision) {
+          const page = readPage(args.page_path);
+          if (!page) return `Page ${args.page_path} not found.`;
+
+          if (args.section_heading) {
+            // Replace specific section
+            const headingPattern = new RegExp(
+              `(^#{1,6}\\s*${args.section_heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$)`,
+              "m"
+            );
+            const headingMatch = page.match(headingPattern);
+            if (!headingMatch || headingMatch.index === undefined) {
+              return `Section "${args.section_heading}" not found in ${args.page_path}.`;
+            }
+            const sectionStart = headingMatch.index;
+            // Find next heading of same or higher level
+            const level = (headingMatch[1].match(/^#+/) || ["#"])[0].length;
+            const nextHeading = page.slice(sectionStart + headingMatch[0].length)
+              .search(new RegExp(`^#{1,${level}}\\s`, "m"));
+            const sectionEnd = nextHeading === -1
+              ? page.length
+              : sectionStart + headingMatch[0].length + nextHeading;
+            const updated = page.slice(0, sectionStart) + args.revision + "\n" + page.slice(sectionEnd);
+            writePage(args.page_path, updated);
+          } else {
+            // Replace entire body (keep frontmatter)
+            const fmMatch = page.match(/^---[\s\S]*?---\s*/);
+            const frontmatter = fmMatch ? fmMatch[0] : "";
+            writePage(args.page_path, frontmatter + args.revision + "\n");
+          }
+          appendLog("update", `forget: revised section in ${args.page_path}`);
+          return `Revised content in ${args.page_path}.`;
+        }
+
+        return "Nothing to do — provide content (line-removal) or revision (section-rewrite).";
       },
     }),
 
