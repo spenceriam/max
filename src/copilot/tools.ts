@@ -9,9 +9,10 @@ import { config, persistModel } from "../config.js";
 import { SESSIONS_DIR } from "../paths.js";
 import { getCurrentSourceChannel, switchSessionModel } from "./orchestrator.js";
 import { getRouterConfig, updateRouterConfig } from "./router.js";
-import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir } from "../wiki/fs.js";
-import { searchIndex, addToIndex, removeFromIndex, parseIndex, type IndexEntry } from "../wiki/index-manager.js";
+import { ensureWikiStructure, readPage, writePage, deletePage, listPages, writeRawSource, listSources, getWikiDir, assertPagePath } from "../wiki/fs.js";
+import { searchIndex, addToIndex, removeFromIndex, parseIndex, buildIndexEntryForPage, type IndexEntry } from "../wiki/index-manager.js";
 import { appendLog } from "../wiki/log-manager.js";
+import { withWikiWrite } from "../wiki/lock.js";
 
 function getCategoryDir(category: string): string {
   const map: Record<string, string> = {
@@ -23,6 +24,29 @@ function getCategoryDir(category: string): string {
     decision: "decisions",
   };
   return map[category] || category;
+}
+
+/** Escape a string for safe inclusion as a single-line YAML scalar value. */
+function yamlEscape(value: string): string {
+  // Always quote and escape backslashes, double quotes, and newlines.
+  const escaped = value
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
+  return `"${escaped}"`;
+}
+
+/** Escape a single token for use inside a YAML inline list `[a, b]`. */
+function yamlListItem(value: string): string {
+  // Restrict to a safe character set; replace anything else.
+  const safe = value.replace(/[^A-Za-z0-9_./-]/g, "-");
+  return safe || "untagged";
+}
+
+/** Sanitize a single line for safe inclusion as an index/log table entry. */
+function indexSafe(text: string): string {
+  return text.replace(/[\r\n|]/g, " ").trim();
 }
 
 function isTimeoutError(err: unknown): boolean {
@@ -511,88 +535,95 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         related: z.array(z.string()).optional().describe("Wiki page paths this connects to, for cross-referencing"),
       }),
       handler: async (args) => {
-        ensureWikiStructure();
-        const now = new Date().toISOString().slice(0, 10);
+        return withWikiWrite(async () => {
+          ensureWikiStructure();
+          const now = new Date().toISOString().slice(0, 10);
 
-        // Entity routing: code-authoritative slugification and page lookup
-        let pagePath: string;
-        let title: string;
-        if (args.entity) {
-          const slug = args.entity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-          const categoryDir = getCategoryDir(args.category);
-          pagePath = `pages/${categoryDir}/${slug}.md`;
+          // Entity routing: code-authoritative slugification and page lookup
+          let pagePath: string;
+          let title: string;
+          if (args.entity) {
+            const slug = args.entity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+            const categoryDir = getCategoryDir(args.category);
+            pagePath = `pages/${categoryDir}/${slug}.md`;
 
-          // Check for existing page with fuzzy match before creating new
-          const existingPages = searchIndex(args.entity, 5);
-          const existingMatch = existingPages.find((p) => {
-            const pSlug = p.path.split("/").pop()?.replace(".md", "") || "";
-            return pSlug === slug || p.title.toLowerCase() === args.entity!.toLowerCase();
-          });
-          if (existingMatch) {
-            pagePath = existingMatch.path;
-            title = existingMatch.title;
+            // Check for existing page with fuzzy match before creating new
+            const existingPages = searchIndex(args.entity, 5);
+            const existingMatch = existingPages.find((p) => {
+              const pSlug = p.path.split("/").pop()?.replace(".md", "") || "";
+              return pSlug === slug || p.title.toLowerCase() === args.entity!.toLowerCase();
+            });
+            if (existingMatch) {
+              pagePath = existingMatch.path;
+              title = existingMatch.title;
+            } else {
+              title = args.entity.split(/[-_\s]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+            }
           } else {
-            title = args.entity.split(/[-_\s]+/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+            const categoryMap: Record<string, string> = {
+              preference: "pages/preferences.md",
+              fact: "pages/facts.md",
+              project: "pages/projects.md",
+              person: "pages/people.md",
+              routine: "pages/routines.md",
+              decision: "pages/decisions.md",
+            };
+            pagePath = categoryMap[args.category] || `pages/${args.category}.md`;
+            title = args.category.charAt(0).toUpperCase() + args.category.slice(1);
           }
-        } else {
-          const categoryMap: Record<string, string> = {
-            preference: "pages/preferences.md",
-            fact: "pages/facts.md",
-            project: "pages/projects.md",
-            person: "pages/people.md",
-            routine: "pages/routines.md",
-            decision: "pages/decisions.md",
-          };
-          pagePath = categoryMap[args.category] || `pages/${args.category}.md`;
-          title = args.category.charAt(0).toUpperCase() + args.category.slice(1);
-        }
 
-        const existing = readPage(pagePath);
-        if (existing) {
-          // Read-before-write: check if this info updates something existing
-          const updated = existing.replace(
-            /^(---[\s\S]*?updated:\s*)[\d-]+/m,
-            `$1${now}`
-          );
-          writePage(pagePath, updated.trimEnd() + `\n- ${args.content} _(${now})_\n`);
-        } else {
-          const relatedRefs = args.related?.length
-            ? `related: [${args.related.join(", ")}]` : "related: []";
-          const tags: string[] = [args.category];
-          if (args.entity) tags.push(args.entity.toLowerCase());
-          const page = [
-            "---",
-            `title: ${title}`,
-            `tags: [${tags.join(", ")}]`,
-            `created: ${now}`,
-            `updated: ${now}`,
-            relatedRefs,
-            "---",
-            "",
-            `# ${title}`,
-            "",
-            `- ${args.content} _(${now})_`,
-            "",
-          ].join("\n");
-          writePage(pagePath, page);
-        }
+          // Defense-in-depth: pagePath is constructed from controlled parts but
+          // assertPagePath will catch any drift (e.g. an entity slug producing "..").
+          assertPagePath(pagePath);
 
-        const indexTags: string[] = [args.category];
-        if (args.entity) indexTags.push(args.entity.toLowerCase());
-        addToIndex({
-          path: pagePath,
-          title,
-          summary: args.content.slice(0, 120),
-          section: "Knowledge",
-          tags: indexTags,
-          updated: now,
+          const existing = readPage(pagePath);
+          if (existing) {
+            const updated = existing.replace(
+              /^(---[\s\S]*?updated:\s*)[\d-]+/m,
+              `$1${now}`
+            );
+            writePage(pagePath, updated.trimEnd() + `\n- ${args.content} _(${now})_\n`);
+          } else {
+            const tags: string[] = [args.category];
+            if (args.entity) tags.push(args.entity.toLowerCase());
+            const safeTags = tags.map(yamlListItem).join(", ");
+            const safeRelated = (args.related || []).map(yamlListItem).join(", ");
+            const page = [
+              "---",
+              `title: ${yamlEscape(title)}`,
+              `tags: [${safeTags}]`,
+              `created: ${now}`,
+              `updated: ${now}`,
+              `related: [${safeRelated}]`,
+              "---",
+              "",
+              `# ${title}`,
+              "",
+              `- ${args.content} _(${now})_`,
+              "",
+            ].join("\n");
+            writePage(pagePath, page);
+          }
+
+          // Rebuild the index entry from the page on disk so summary/tags/updated
+          // stay in sync rather than being clobbered by the latest bullet.
+          const rebuilt = buildIndexEntryForPage(pagePath, {
+            title,
+            section: "Knowledge",
+            tags: [args.category, ...(args.entity ? [args.entity.toLowerCase()] : [])],
+            updated: now,
+            // Keep existing summary if present; otherwise use the new content.
+            summary: indexSafe(args.content).slice(0, 120),
+          });
+          if (rebuilt) addToIndex(rebuilt);
+
+          appendLog("update", `remember (${args.category}${args.entity ? `, ${args.entity}` : ""}): ${indexSafe(args.content).slice(0, 80)}`);
+
+          const relatedHint = args.related?.length
+            ? ` Related pages that may need updating: ${args.related.join(", ")}`
+            : "";
+          return `Remembered in ${pagePath}: "${args.content}"${relatedHint}`;
         });
-        appendLog("update", `remember (${args.category}${args.entity ? `, ${args.entity}` : ""}): ${args.content.slice(0, 80)}`);
-
-        const relatedHint = args.related?.length
-          ? ` Related pages that may need updating: ${args.related.join(", ")}`
-          : "";
-        return `Remembered in ${pagePath}: "${args.content}"${relatedHint}`;
       },
     }),
 
@@ -646,75 +677,124 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         section_heading: z.string().optional().describe("The heading of the section to replace (used with revision)"),
       }),
       handler: async (args) => {
-        // Delete entire page
-        if (!args.content && !args.revision) {
-          const page = readPage(args.page_path);
-          if (!page) return `Page ${args.page_path} not found.`;
-          deletePage(args.page_path);
-          removeFromIndex(args.page_path);
-          appendLog("delete", `forget: deleted page ${args.page_path}`);
-          return `Deleted page ${args.page_path} and removed from index.`;
-        }
+        return withWikiWrite(async () => {
+          // Defense: only allow modifying real pages, never index.md / log.md / sources/.
+          assertPagePath(args.page_path);
 
-        // Line-removal mode: remove bullet lines matching content
-        if (args.content) {
-          const page = readPage(args.page_path);
-          if (!page) return `Page ${args.page_path} not found.`;
-          const lines = page.split("\n");
-          const before = lines.length;
-          const updated = lines
-            .filter((line) => {
-              if (line.trim().startsWith("-") && line.includes(args.content!)) {
-                return false;
+          // Delete entire page
+          if (!args.content && !args.revision) {
+            const page = readPage(args.page_path);
+            if (!page) return `Page ${args.page_path} not found.`;
+            deletePage(args.page_path);
+            removeFromIndex(args.page_path);
+            appendLog("delete", `forget: deleted page ${args.page_path}`);
+            return `Deleted page ${args.page_path} and removed from index.`;
+          }
+
+          // Line-removal mode: remove bullet lines that match content.
+          // Precision rules: prefer a single exact match (whole bullet body equals
+          // the search text). If no exact match, fall back to substring match —
+          // but if the substring would match >1 bullets, refuse and report so the
+          // caller can disambiguate. This prevents "forget CST" from nuking every
+          // bullet that happens to mention CST.
+          if (args.content) {
+            const page = readPage(args.page_path);
+            if (!page) return `Page ${args.page_path} not found.`;
+            const search = args.content.trim();
+            const lines = page.split("\n");
+
+            const isBullet = (l: string) => /^\s*[-*]\s+/.test(l);
+            const bulletText = (l: string) =>
+              l.replace(/^\s*[-*]\s+/, "").replace(/\s*_\(\d{4}-\d{2}-\d{2}\)_\s*$/, "").trim();
+
+            // Pass 1: exact-bullet match (case-insensitive).
+            const exactMatches: number[] = [];
+            for (let i = 0; i < lines.length; i++) {
+              if (isBullet(lines[i]) && bulletText(lines[i]).toLowerCase() === search.toLowerCase()) {
+                exactMatches.push(i);
               }
-              return true;
-            })
-            .join("\n");
-          const removed = before - updated.split("\n").length;
-          if (removed > 0) {
-            writePage(args.page_path, updated);
-            appendLog("update", `forget: removed ${removed} line(s) matching "${args.content!.slice(0, 60)}" from ${args.page_path}`);
-            return `Removed ${removed} line(s) from ${args.page_path}.`;
-          }
-          return `No matching bullet points found in ${args.page_path}.`;
-        }
-
-        // Section-rewrite mode: replace a section with revised content
-        if (args.revision) {
-          const page = readPage(args.page_path);
-          if (!page) return `Page ${args.page_path} not found.`;
-
-          if (args.section_heading) {
-            // Replace specific section
-            const headingPattern = new RegExp(
-              `(^#{1,6}\\s*${args.section_heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$)`,
-              "m"
-            );
-            const headingMatch = page.match(headingPattern);
-            if (!headingMatch || headingMatch.index === undefined) {
-              return `Section "${args.section_heading}" not found in ${args.page_path}.`;
             }
-            const sectionStart = headingMatch.index;
-            // Find next heading of same or higher level
-            const level = (headingMatch[1].match(/^#+/) || ["#"])[0].length;
-            const nextHeading = page.slice(sectionStart + headingMatch[0].length)
-              .search(new RegExp(`^#{1,${level}}\\s`, "m"));
-            const sectionEnd = nextHeading === -1
-              ? page.length
-              : sectionStart + headingMatch[0].length + nextHeading;
-            const updated = page.slice(0, sectionStart) + args.revision + "\n" + page.slice(sectionEnd);
-            writePage(args.page_path, updated);
-          } else {
-            // Replace entire body (keep frontmatter)
-            const fmMatch = page.match(/^---[\s\S]*?---\s*/);
-            const frontmatter = fmMatch ? fmMatch[0] : "";
-            writePage(args.page_path, frontmatter + args.revision + "\n");
-          }
-          appendLog("update", `forget: revised section in ${args.page_path}`);
-          return `Revised content in ${args.page_path}.`;
-        }
 
-        return "Nothing to do — provide content (line-removal) or revision (section-rewrite).";
+            let toRemove: Set<number>;
+            if (exactMatches.length > 0) {
+              toRemove = new Set(exactMatches);
+            } else {
+              // Pass 2: substring match — but require precision.
+              const subMatches: number[] = [];
+              for (let i = 0; i < lines.length; i++) {
+                if (isBullet(lines[i]) && lines[i].toLowerCase().includes(search.toLowerCase())) {
+                  subMatches.push(i);
+                }
+              }
+              if (subMatches.length === 0) {
+                return `No matching bullet points found in ${args.page_path}.`;
+              }
+              if (subMatches.length > 1) {
+                const preview = subMatches.slice(0, 5)
+                  .map((i) => `  • ${lines[i].trim()}`).join("\n");
+                return `Refused: substring "${search}" matches ${subMatches.length} bullets in ${args.page_path}. Be more specific (paste the full bullet text), or call forget repeatedly with the exact bullet to remove. Matches:\n${preview}`;
+              }
+              toRemove = new Set(subMatches);
+            }
+
+            const updatedLines = lines.filter((_, i) => !toRemove.has(i));
+            // Bump frontmatter `updated:` so the index reflects the change.
+            const today = new Date().toISOString().slice(0, 10);
+            let updated = updatedLines.join("\n").replace(
+              /^(---[\s\S]*?updated:\s*)[\d-]+/m,
+              `$1${today}`
+            );
+            writePage(args.page_path, updated);
+
+            // Refresh the corresponding index entry from the page so the index
+            // doesn't keep advertising forgotten content.
+            const rebuilt = buildIndexEntryForPage(args.page_path, { updated: today });
+            if (rebuilt) addToIndex(rebuilt);
+
+            appendLog("update", `forget: removed ${toRemove.size} line(s) matching "${indexSafe(search).slice(0, 60)}" from ${args.page_path}`);
+            return `Removed ${toRemove.size} line(s) from ${args.page_path}.`;
+          }
+
+          // Section-rewrite mode: replace a section with revised content
+          if (args.revision) {
+            const page = readPage(args.page_path);
+            if (!page) return `Page ${args.page_path} not found.`;
+
+            if (args.section_heading) {
+              const headingPattern = new RegExp(
+                `(^#{1,6}\\s*${args.section_heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*$)`,
+                "m"
+              );
+              const headingMatch = page.match(headingPattern);
+              if (!headingMatch || headingMatch.index === undefined) {
+                return `Section "${args.section_heading}" not found in ${args.page_path}.`;
+              }
+              const sectionStart = headingMatch.index;
+              const level = (headingMatch[1].match(/^#+/) || ["#"])[0].length;
+              const nextHeading = page.slice(sectionStart + headingMatch[0].length)
+                .search(new RegExp(`^#{1,${level}}\\s`, "m"));
+              const sectionEnd = nextHeading === -1
+                ? page.length
+                : sectionStart + headingMatch[0].length + nextHeading;
+              const updated = page.slice(0, sectionStart) + args.revision + "\n" + page.slice(sectionEnd);
+              writePage(args.page_path, updated);
+            } else {
+              // Replace entire body (keep frontmatter)
+              const fmMatch = page.match(/^---[\s\S]*?---\s*/);
+              const frontmatter = fmMatch ? fmMatch[0] : "";
+              writePage(args.page_path, frontmatter + args.revision + "\n");
+            }
+
+            const today = new Date().toISOString().slice(0, 10);
+            const rebuilt = buildIndexEntryForPage(args.page_path, { updated: today });
+            if (rebuilt) addToIndex(rebuilt);
+
+            appendLog("update", `forget: revised section in ${args.page_path}`);
+            return `Revised content in ${args.page_path}.`;
+          }
+
+          return "Nothing to do — provide content (line-removal) or revision (section-rewrite).";
+        });
       },
     }),
 
@@ -767,16 +847,37 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         content: z.string().describe("Full page content (markdown)"),
       }),
       handler: async (args) => {
-        ensureWikiStructure();
-        writePage(args.path, args.content);
-        addToIndex({
-          path: args.path,
-          title: args.title,
-          summary: args.summary,
-          section: args.section || "Knowledge",
+        return withWikiWrite(async () => {
+          ensureWikiStructure();
+          assertPagePath(args.path);
+          writePage(args.path, args.content);
+          // Rebuild from disk so the index summary/tags/updated reflect the actual page,
+          // but prefer caller-supplied title/summary/section as overrides.
+          const today = new Date().toISOString().slice(0, 10);
+          const rebuilt = buildIndexEntryForPage(args.path, {
+            title: args.title,
+            summary: indexSafe(args.summary).slice(0, 160),
+            section: args.section || "Knowledge",
+            updated: today,
+          });
+          if (rebuilt) {
+            // Overrides win even if the page frontmatter says otherwise.
+            rebuilt.title = args.title;
+            rebuilt.summary = indexSafe(args.summary).slice(0, 160);
+            rebuilt.section = args.section || "Knowledge";
+            addToIndex(rebuilt);
+          } else {
+            addToIndex({
+              path: args.path,
+              title: args.title,
+              summary: indexSafe(args.summary).slice(0, 160),
+              section: args.section || "Knowledge",
+              updated: today,
+            });
+          }
+          appendLog("update", `wiki_update: ${indexSafe(args.title)} (${args.path})`);
+          return `Wiki page updated: ${args.title} (${args.path})`;
         });
-        appendLog("update", `wiki_update: ${args.title} (${args.path})`);
-        return `Wiki page updated: ${args.title} (${args.path})`;
       },
     }),
 
@@ -835,8 +936,10 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
         }
 
         const fileName = `${new Date().toISOString().slice(0, 10)}-${sourceName}.md`;
-        writeRawSource(fileName, content);
-        appendLog("ingest", `Ingested ${args.type}: ${sourceName} (${content.length} chars)`);
+        await withWikiWrite(async () => {
+          writeRawSource(fileName, content);
+          appendLog("ingest", `Ingested ${args.type}: ${indexSafe(sourceName)} (${content.length} chars)`);
+        });
 
         // Return the content so the LLM can create wiki pages from it
         const preview = content.length > 3000 ? content.slice(0, 3000) + "\n\n…(truncated)" : content;
@@ -878,6 +981,22 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
 
         appendLog("lint", `${orphans.length} orphans, ${missing.length} missing`);
         return report.join("\n");
+      },
+    }),
+
+    defineTool("wiki_rebuild_index", {
+      description:
+        "Rebuild the wiki index.md from the pages on disk. Use when the index is " +
+        "corrupted, out of sync with pages, or after manual edits to the wiki. " +
+        "Safe to run anytime — it preserves section assignments where possible.",
+      parameters: z.object({}),
+      handler: async () => {
+        return withWikiWrite(async () => {
+          const { rebuildIndexFromPages } = await import("../wiki/index-manager.js");
+          const entries = rebuildIndexFromPages();
+          appendLog("lint", `wiki_rebuild_index: rebuilt ${entries.length} entries from pages on disk`);
+          return `Rebuilt index with ${entries.length} entries.`;
+        });
       },
     }),
 

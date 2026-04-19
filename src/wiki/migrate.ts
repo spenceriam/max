@@ -86,11 +86,27 @@ export function migrateMemoriesToWiki(): number {
 
     // Check if a page already exists (avoid clobbering manual content)
     const existing = readPage(mapping.path);
+    // Idempotency marker: if the migration block was already appended, skip the
+    // append so re-runs don't duplicate bullets.
+    const MIGRATE_MARKER = `<!-- migrate:${category}:v1 -->`;
     if (existing) {
+      if (existing.includes(MIGRATE_MARKER)) {
+        // Already migrated; just refresh the index entry.
+        const entry: IndexEntry = {
+          path: mapping.path,
+          title: mapping.title,
+          summary: `${items.length} ${category} memories (already migrated)`,
+          section: mapping.section,
+        };
+        addToIndex(entry);
+        continue;
+      }
       // Extract only the bullet-point items to append
       const bulletLines = lines.filter((l) => l.startsWith("- "));
-      writePage(mapping.path, existing + "\n## Migrated Memories\n\n" + bulletLines.join("\n") + "\n");
+      writePage(mapping.path, existing + `\n${MIGRATE_MARKER}\n## Migrated Memories\n\n` + bulletLines.join("\n") + "\n");
     } else {
+      // Embed the marker in fresh pages too so future re-runs are no-ops.
+      lines.splice(lines.length - 1, 0, MIGRATE_MARKER);
       writePage(mapping.path, lines.join("\n"));
     }
 
@@ -222,14 +238,19 @@ export function reorganizeWiki(): number {
       const slug = entity.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
       const entityPath = `pages/${categoryDir}/${slug}.md`;
       const existing = readPage(entityPath);
+      const REORG_MARKER = `<!-- reorg:${entity.toLowerCase()}:v1 -->`;
 
       if (existing) {
+        if (existing.includes(REORG_MARKER)) {
+          // Already reorganized into this entity page; skip duplicate append.
+          continue;
+        }
         // Append to existing entity page
         const updated = existing.replace(
           /^(---[\s\S]*?updated:\s*)[\d-]+/m,
           `$1${now}`
         );
-        writePage(entityPath, updated.trimEnd() + "\n" + entityBullets.join("\n") + "\n");
+        writePage(entityPath, updated.trimEnd() + `\n${REORG_MARKER}\n` + entityBullets.join("\n") + "\n");
       } else {
         const page = [
           "---",
@@ -241,6 +262,8 @@ export function reorganizeWiki(): number {
           "---",
           "",
           `# ${entity}`,
+          "",
+          REORG_MARKER,
           "",
           ...entityBullets,
           "",

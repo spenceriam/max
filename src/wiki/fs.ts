@@ -2,12 +2,50 @@
 // Wiki file system primitives
 // ---------------------------------------------------------------------------
 
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from "fs";
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync, renameSync, openSync, fsyncSync, closeSync } from "fs";
 import { join, dirname, relative, resolve, sep } from "path";
 import { WIKI_DIR, WIKI_PAGES_DIR, WIKI_SOURCES_DIR } from "../paths.js";
 
 const INDEX_PATH = join(WIKI_DIR, "index.md");
 const LOG_PATH = join(WIKI_DIR, "log.md");
+
+/**
+ * Write a file atomically: write to a temp file in the same directory, fsync,
+ * then rename over the destination. Prevents partial writes on crash and
+ * gives readers an all-or-nothing view.
+ */
+export function writeFileAtomic(fullPath: string, content: string): void {
+  mkdirSync(dirname(fullPath), { recursive: true });
+  const tmp = `${fullPath}.${process.pid}.${Date.now()}.tmp`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeFileSync(fd, content, "utf-8");
+    try { fsyncSync(fd); } catch { /* fsync may fail on some FSes; non-fatal */ }
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, fullPath);
+}
+
+/** Throw if the given relative path is not safely under pages/. Used by mutation tools. */
+export function assertPagePath(relativePath: string): void {
+  if (!relativePath || typeof relativePath !== "string") {
+    throw new Error("Wiki path is required");
+  }
+  if (relativePath.includes("\0") || relativePath.includes("..")) {
+    throw new Error(`Refused unsafe wiki path: ${relativePath}`);
+  }
+  if (!relativePath.startsWith("pages/")) {
+    throw new Error(
+      `Refused: only pages under pages/ may be modified by tools. Got: ${relativePath}`
+    );
+  }
+  if (!relativePath.endsWith(".md")) {
+    throw new Error(`Wiki page paths must end in .md: ${relativePath}`);
+  }
+  // resolvePath also enforces the wiki-root containment check.
+  resolvePath(relativePath);
+}
 
 function getInitialIndex(): string {
   return `# Wiki Index
@@ -39,10 +77,10 @@ export function ensureWikiStructure(): boolean {
   mkdirSync(WIKI_SOURCES_DIR, { recursive: true });
 
   if (!existsSync(INDEX_PATH)) {
-    writeFileSync(INDEX_PATH, getInitialIndex(), "utf-8");
+    writeFileAtomic(INDEX_PATH, getInitialIndex());
   }
   if (!existsSync(LOG_PATH)) {
-    writeFileSync(LOG_PATH, INITIAL_LOG, "utf-8");
+    writeFileAtomic(LOG_PATH, INITIAL_LOG);
   }
 
   return isNew;
@@ -55,11 +93,10 @@ export function readPage(relativePath: string): string | undefined {
   return readFileSync(fullPath, "utf-8");
 }
 
-/** Write a wiki page. Creates parent directories automatically. */
+/** Write a wiki page atomically. Creates parent directories automatically. */
 export function writePage(relativePath: string, content: string): void {
   const fullPath = resolvePath(relativePath);
-  mkdirSync(dirname(fullPath), { recursive: true });
-  writeFileSync(fullPath, content, "utf-8");
+  writeFileAtomic(fullPath, content);
 }
 
 /** Delete a wiki page. Returns true if the file existed and was removed. */
@@ -85,10 +122,12 @@ export function listPages(): string[] {
 
 /** Save a raw source document (immutable). */
 export function writeRawSource(name: string, content: string): void {
-  const safeName = name.replace(/[^a-zA-Z0-9._-]/g, "-");
-  const fullPath = join(WIKI_SOURCES_DIR, safeName);
-  mkdirSync(dirname(fullPath), { recursive: true });
-  writeFileSync(fullPath, content, "utf-8");
+  const safeName = name.replace(/[^a-zA-Z0-9._/-]/g, "-").replace(/\.\.+/g, "-");
+  const fullPath = resolve(WIKI_SOURCES_DIR, safeName);
+  if (!fullPath.startsWith(WIKI_SOURCES_DIR + sep)) {
+    throw new Error(`Source path escapes sources dir: ${name}`);
+  }
+  writeFileAtomic(fullPath, content);
 }
 
 /** Read a raw source document. */
@@ -114,9 +153,9 @@ export function readIndexFile(): string {
   return readFileSync(INDEX_PATH, "utf-8");
 }
 
-/** Write index.md content. */
+/** Write index.md content atomically. */
 export function writeIndexFile(content: string): void {
-  writeFileSync(INDEX_PATH, content, "utf-8");
+  writeFileAtomic(INDEX_PATH, content);
 }
 
 /** Read log.md raw content. */
@@ -125,9 +164,9 @@ export function readLogFile(): string {
   return readFileSync(LOG_PATH, "utf-8");
 }
 
-/** Write log.md content. */
+/** Write log.md content atomically. */
 export function writeLogFile(content: string): void {
-  writeFileSync(LOG_PATH, content, "utf-8");
+  writeFileAtomic(LOG_PATH, content);
 }
 
 /** Get the full wiki directory path (for external tools that need it). */
