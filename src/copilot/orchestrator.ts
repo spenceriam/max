@@ -1,4 +1,4 @@
-import { type CopilotClient, type CopilotSession } from "@github/copilot-sdk";
+import { approveAll, type CopilotClient, type CopilotSession } from "@github/copilot-sdk";
 import { createTools, type ToolDeps } from "./tools.js";
 import { getOrchestratorSystemMessage } from "./system-message.js";
 import { config, DEFAULT_MODEL } from "../config.js";
@@ -19,16 +19,9 @@ import {
 
 /**
  * Permission handler for the orchestrator session.
- * Only custom-tool (management tools) and mcp (MCP server tools) are allowed.
- * Shell commands, file read/write, and URL operations are denied so all real
- * work is forced through worker sessions.
+ * Approves all tool requests so @max has full access to all tools.
  */
-const orchestratorPermissionHandler = (request: { kind: string }) => {
-  if (request.kind === "custom-tool" || request.kind === "mcp") {
-    return { kind: "approved" as const };
-  }
-  return { kind: "denied-by-rules" as const, rules: [] as unknown[] };
-};
+const orchestratorPermissionHandler = approveAll;
 
 const MAX_RETRIES = 3;
 const RECONNECT_DELAYS_MS = [1_000, 3_000, 10_000];

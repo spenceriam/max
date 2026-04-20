@@ -313,18 +313,16 @@ const MANAGEMENT_TOOL_NAMES = new Set([
 
 /** Filter tools based on agent config. */
 export function filterToolsForAgent(agent: AgentConfig, allTools: Tool<any>[]): Tool<any>[] {
-  if (agent.slug === "max") {
-    // @max gets all tools
-    return allTools;
-  }
-
   if (agent.tools && agent.tools.length > 0) {
     // Agent specifies an explicit allowlist — give those + wiki tools
     const allowed = new Set([...agent.tools, ...WIKI_TOOL_NAMES]);
     return allTools.filter((t) => allowed.has(t.name));
   }
 
-  // Default: all execution tools + wiki, but NOT management tools
+  // Default: all tools except management (only @max gets those)
+  if (agent.slug === "max") {
+    return allTools;
+  }
   return allTools.filter((t) => !MANAGEMENT_TOOL_NAMES.has(t.name));
 }
 
