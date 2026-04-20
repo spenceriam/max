@@ -76,6 +76,7 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
       parameters: z.object({
         agent_name: z.string().describe("Name or slug of the agent to delegate to (e.g. 'coder', 'designer', 'general-purpose')"),
         task: z.string().describe("Detailed task description for the agent"),
+        summary: z.string().describe("Short human-readable summary of the task (under 80 chars, e.g. 'Fix login button styling')"),
         model_override: z.string().optional().describe("Model override for agents with model 'auto' (e.g. 'gpt-4.1', 'claude-sonnet-4.6', 'claude-opus-4.6')"),
       }),
       handler: async (args) => {
@@ -98,13 +99,13 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           return `Failed to create session for @${agent.slug}: ${msg}`;
         }
 
-        const task = registerTask(agent.slug, args.task, getCurrentSourceChannel());
+        const task = registerTask(agent.slug, args.summary, getCurrentSourceChannel());
 
         // Persist task to DB
         const db = getDb();
         db.prepare(
           `INSERT INTO agent_tasks (task_id, agent_slug, description, status, origin_channel) VALUES (?, ?, ?, 'running', ?)`
-        ).run(task.taskId, agent.slug, args.task, task.originChannel || null);
+        ).run(task.taskId, agent.slug, args.summary, task.originChannel || null);
 
         const timeoutMs = config.workerTimeoutMs;
         // Non-blocking: dispatch and return immediately. Session is always destroyed after.
