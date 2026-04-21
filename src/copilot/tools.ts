@@ -126,9 +126,9 @@ export function createTools(deps: ToolDeps): Tool<any>[] {
           }
         })();
 
-        const model = agent.model === "auto"
-          ? (args.model_override || "claude-sonnet-4.6")
-          : agent.model;
+        const model = (args.model_override && args.model_override.length > 0)
+          ? args.model_override
+          : (agent.model === "auto" ? "claude-sonnet-4.6" : agent.model);
         return `Task delegated to @${agent.slug} (${model}). Task ID: ${task.taskId}. I'll notify you when it's done.`;
       },
     }),

@@ -346,9 +346,11 @@ export async function createEphemeralAgentSession(
   const agent = getAgent(slug);
   if (!agent) throw new Error(`Agent '${slug}' not found in registry.`);
 
-  const model = agent.model === "auto"
-    ? (modelOverride || "claude-sonnet-4.6")
-    : agent.model;
+  // Explicit override always wins. Otherwise use frontmatter model (with
+  // fallback to sonnet for "auto" agents that receive no override).
+  const model = (modelOverride && modelOverride.length > 0)
+    ? modelOverride
+    : (agent.model === "auto" ? "claude-sonnet-4.6" : agent.model);
   const tools = filterToolsForAgent(agent, allTools);
   const mcpServers = loadMcpConfig();
   const skillDirectories = getSkillDirectories();
