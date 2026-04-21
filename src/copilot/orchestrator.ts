@@ -316,8 +316,16 @@ async function executeOnSession(
     const finalContent = result?.data?.content || accumulated || "(No response)";
     return finalContent;
   } catch (err) {
-    // If the session is broken, invalidate it so it's recreated on next attempt
     const msg = err instanceof Error ? err.message : String(err);
+
+    // On timeout, return whatever was streamed so far rather than retrying
+    // (the message was already sent to the persistent session)
+    if (/timeout/i.test(msg) && accumulated.length > 0) {
+      console.log(`[max] Timeout but have ${accumulated.length} chars of streamed content — returning partial response`);
+      return accumulated;
+    }
+
+    // If the session is broken, invalidate it so it's recreated on next attempt
     if (/closed|destroy|disposed|invalid|expired|not found/i.test(msg)) {
       console.log(`[max] Session appears dead, will recreate: ${msg}`);
       orchestratorSession = undefined;
@@ -392,7 +400,10 @@ async function processQueue(): Promise<void> {
 
 function isRecoverableError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
-  return /timeout|disconnect|connection|EPIPE|ECONNRESET|ECONNREFUSED|socket|closed|ENOENT|spawn|not found|expired|stale/i.test(msg);
+  // Timeouts are NOT retryable on a persistent session — the message was already
+  // sent and likely processed; re-sending creates "duplicate" responses.
+  if (/timeout/i.test(msg)) return false;
+  return /disconnect|connection|EPIPE|ECONNRESET|ECONNREFUSED|socket|closed|ENOENT|spawn|not found|expired|stale/i.test(msg);
 }
 
 export async function sendToOrchestrator(
