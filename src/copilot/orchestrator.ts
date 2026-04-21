@@ -283,6 +283,9 @@ export async function initOrchestrator(client: CopilotClient): Promise<void> {
   }
 }
 
+/** How long to wait for the orchestrator to finish a turn (10 min). */
+const ORCHESTRATOR_TIMEOUT_MS = 600_000;
+
 /** Send a prompt on the persistent session, return the response. */
 async function executeOnSession(
   prompt: string,
@@ -294,8 +297,10 @@ async function executeOnSession(
 
   let accumulated = "";
   let toolCallExecuted = false;
+  let toolCallCount = 0;
   const unsubToolDone = session.on("tool.execution_complete", () => {
     toolCallExecuted = true;
+    toolCallCount++;
   });
   const unsubDelta = session.on("assistant.message_delta", (event) => {
     // After a tool call completes, ensure a line break separates the text blocks
@@ -311,18 +316,29 @@ async function executeOnSession(
   try {
     const result = await session.sendAndWait(
       { prompt, ...(attachments && attachments.length > 0 ? { attachments } : {}) },
-      300_000
+      ORCHESTRATOR_TIMEOUT_MS
     );
     const finalContent = result?.data?.content || accumulated || "(No response)";
     return finalContent;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
 
-    // On timeout, return whatever was streamed so far rather than retrying
-    // (the message was already sent to the persistent session)
-    if (/timeout/i.test(msg) && accumulated.length > 0) {
-      console.log(`[max] Timeout but have ${accumulated.length} chars of streamed content — returning partial response`);
-      return accumulated;
+    // On timeout, never throw — the message was already sent to the persistent
+    // session and may have been (partially) processed. Return what we have.
+    if (/timeout/i.test(msg)) {
+      if (accumulated.length > 0) {
+        console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s but have ${accumulated.length} chars — returning partial response`);
+        return accumulated;
+      }
+      // No text yet but tool calls ran — the session is working in the background
+      // (e.g. delegate_to_agent dispatched). Don't error out.
+      if (toolCallCount > 0) {
+        console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s — ${toolCallCount} tool call(s) executed but no text yet. Session is still working.`);
+        return "I'm still working on this — I've started processing but it's taking longer than expected. I'll send you the results when I'm done.";
+      }
+      // No text, no tool calls — the session is truly stuck
+      console.log(`[max] Timeout after ${ORCHESTRATOR_TIMEOUT_MS / 1000}s with no activity. Session may be stuck.`);
+      return "Sorry, that request timed out before I could start working on it. Try again or break it into smaller pieces?";
     }
 
     // If the session is broken, invalidate it so it's recreated on next attempt
